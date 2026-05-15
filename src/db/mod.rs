@@ -3,7 +3,7 @@ mod exasol;
 use chrono::{DateTime, Utc};
 use thiserror::Error;
 
-pub use exasol::{ExasolDb, ExasolDbConfig, build_tasks_last_changed_query};
+pub use exasol::{ExasolDb, ExasolDbConfig, build_tasks_last_changed_query, build_write_history_sql};
 
 use crate::model::{HistoryEvent, TaskRow};
 

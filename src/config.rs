@@ -29,6 +29,7 @@ impl AppConfig {
     pub fn from_env_and_optional_dsn(cli_dsn: Option<String>) -> Result<Self, ConfigError> {
         let schema = env_or_default("EXA_SCHEMA", "PUBLIC");
         let tasks_table = env_or_default("EXA_TASKS_TABLE", "SCHED_TASKS");
+        let history_table = env_or_default("EXA_HISTORY_TABLE", "SCHED_HISTORY");
         let poll_interval_secs = parse_u64_env("POLL_INTERVAL_SECS", 10)?;
         let query_timeout = env::var("EXA_QUERY_TIMEOUT_SECS")
             .ok()
@@ -88,6 +89,7 @@ impl AppConfig {
                 dsn,
                 schema,
                 tasks_table,
+                history_table,
             },
             poll_interval: Duration::from_secs(poll_interval_secs),
         })
@@ -209,7 +211,7 @@ mod tests {
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    const CONFIG_ENV_KEYS: [&str; 11] = [
+    const CONFIG_ENV_KEYS: [&str; 12] = [
         "EXA_DSN",
         "EXA_HOST",
         "EXA_PORT",
@@ -219,6 +221,7 @@ mod tests {
         "EXA_VALIDATE_SERVER_CERT",
         "EXA_SCHEMA",
         "EXA_TASKS_TABLE",
+        "EXA_HISTORY_TABLE",
         "POLL_INTERVAL_SECS",
         "EXA_QUERY_TIMEOUT_SECS",
     ];

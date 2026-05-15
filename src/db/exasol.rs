@@ -17,6 +17,7 @@ pub struct ExasolDbConfig {
     pub dsn: String,
     pub schema: String,
     pub tasks_table: String,
+    pub history_table: String,
 }
 
 /// Production Exasol adapter backed by exarrow-rs.
@@ -37,6 +38,9 @@ impl ExasolDb {
         }
         if config.tasks_table.trim().is_empty() {
             return Err(DbError::Config("tasks table must not be empty".to_string()));
+        }
+        if config.history_table.trim().is_empty() {
+            return Err(DbError::Config("history table must not be empty".to_string()));
         }
 
         Ok(Self { config })
@@ -81,7 +85,7 @@ impl ExasolDb {
             .map_err(|source| DbError::Connection { operation, source })
     }
 
-    fn query_batches(
+    pub fn query_batches(
         &self,
         operation: &'static str,
         sql: String,
@@ -147,9 +151,25 @@ impl SchedulerDb for ExasolDb {
         })
     }
 
-    fn write_history(&self, _event: &HistoryEvent) -> Result<(), DbError> {
-        // Stage-1b intentionally does not persist execution history yet.
-        Ok(())
+    fn write_history(&self, event: &HistoryEvent) -> Result<(), DbError> {
+        let operation = "write_history";
+        let sql = build_write_history_sql(
+            &self.config.schema,
+            &self.config.history_table,
+            event,
+        );
+        Self::run_async(operation, async {
+            let mut connection = self.connect(operation).await?;
+            let result = connection
+                .execute_update(sql.clone())
+                .await
+                .map(|_| ())
+                .map_err(|source| DbError::Query { operation, sql, source });
+            if let Err(close_err) = connection.close().await {
+                tracing::warn!(operation, error = %close_err, "failed to close Exasol connection");
+            }
+            result
+        })
     }
 }
 
@@ -218,12 +238,59 @@ fn decode_task_rows_from_batches(
 }
 
 pub fn build_tasks_last_changed_query(schema: &str, table: &str) -> String {
-    // LAST_COMMIT is the current Stage-1b metadata signal. If your Exasol version
-    // exposes a different "changed" column, update this function only.
+    // ROOT_NAME is the schema identifier in EXA_ALL_OBJECTS (Exasol 2025+/Nano).
+    // ROOT_TYPE = 'SCHEMA' excludes virtual schemas and other root types.
     format!(
-        "SELECT LAST_COMMIT AS LAST_CHANGED FROM SYS.EXA_ALL_OBJECTS WHERE UPPER(OBJECT_SCHEMA) = UPPER({}) AND UPPER(OBJECT_NAME) = UPPER({}) ORDER BY LAST_COMMIT DESC LIMIT 1",
+        "SELECT LAST_COMMIT AS LAST_CHANGED FROM SYS.EXA_ALL_OBJECTS \
+         WHERE ROOT_TYPE = 'SCHEMA' \
+         AND UPPER(ROOT_NAME) = UPPER({}) \
+         AND UPPER(OBJECT_NAME) = UPPER({}) \
+         ORDER BY LAST_COMMIT DESC LIMIT 1",
         quote_literal(schema),
         quote_literal(table)
+    )
+}
+
+pub fn build_write_history_sql(schema: &str, history_table: &str, event: &HistoryEvent) -> String {
+    let graph_run_id = event
+        .graph_run_id
+        .map(|id| quote_literal(&id.to_string()))
+        .unwrap_or_else(|| "NULL".to_string());
+    let scheduled_for = event
+        .scheduled_for
+        .map(|ts| format!("TIMESTAMP '{}'", ts.format("%Y-%m-%d %H:%M:%S%.3f")))
+        .unwrap_or_else(|| "NULL".to_string());
+    let started_at = format!(
+        "TIMESTAMP '{}'",
+        event.started_at.format("%Y-%m-%d %H:%M:%S%.3f")
+    );
+    let finished_at = event
+        .finished_at
+        .map(|ts| format!("TIMESTAMP '{}'", ts.format("%Y-%m-%d %H:%M:%S%.3f")))
+        .unwrap_or_else(|| "NULL".to_string());
+    let error_message = event
+        .error_message
+        .as_deref()
+        .map(quote_literal)
+        .unwrap_or_else(|| "NULL".to_string());
+
+    format!(
+        "INSERT INTO {schema}.{table} \
+         (RUN_ID, GRAPH_RUN_ID, TASK_ID, GRAPH_PHASE, \
+          SCHEDULED_FOR, STARTED_AT, FINISHED_AT, STATUS, ERROR_MESSAGE) \
+         VALUES ({run_id}, {graph_run_id}, {task_id}, {graph_phase}, \
+                 {scheduled_for}, {started_at}, {finished_at}, {status}, {error_message})",
+        schema       = quote_identifier(schema),
+        table        = quote_identifier(history_table),
+        run_id       = quote_literal(&event.run_id.to_string()),
+        graph_run_id = graph_run_id,
+        task_id      = quote_literal(&event.task_id),
+        graph_phase  = quote_literal(&event.graph_phase),
+        scheduled_for = scheduled_for,
+        started_at   = started_at,
+        finished_at  = finished_at,
+        status       = quote_literal(&event.status),
+        error_message = error_message,
     )
 }
 
@@ -453,6 +520,7 @@ mod tests {
             dsn: dsn.to_string(),
             schema: schema.to_string(),
             tasks_table: tasks_table.to_string(),
+            history_table: "SCHED_HISTORY".to_string(),
         }
     }
 
@@ -506,6 +574,15 @@ mod tests {
             ExasolDb::new(config("exasol://u:p@h:8563", "PUBLIC", " ")),
             Err(DbError::Config(message)) if message.contains("tasks table")
         ));
+        assert!(matches!(
+            ExasolDb::new(ExasolDbConfig {
+                dsn: "exasol://u:p@h:8563".to_string(),
+                schema: "PUBLIC".to_string(),
+                tasks_table: "SCHED_TASKS".to_string(),
+                history_table: "  ".to_string(),
+            }),
+            Err(DbError::Config(message)) if message.contains("history table")
+        ));
     }
 
     #[test]
@@ -523,13 +600,16 @@ mod tests {
         let changed_sql = db.tasks_last_changed_sql();
         assert!(changed_sql.contains("LAST_COMMIT AS LAST_CHANGED"));
         assert!(changed_sql.contains("SYS.EXA_ALL_OBJECTS"));
+        assert!(changed_sql.contains("ROOT_NAME"));
     }
 
     #[test]
-    fn last_changed_query_escapes_single_quotes() {
+    fn last_changed_query_escapes_single_quotes_and_uses_root_name() {
         let sql = build_tasks_last_changed_query("SCHE'MA", "TA'BLE");
         assert!(sql.contains("UPPER('SCHE''MA')"));
         assert!(sql.contains("UPPER('TA''BLE')"));
+        assert!(sql.contains("ROOT_NAME"));
+        assert!(sql.contains("ROOT_TYPE = 'SCHEMA'"));
     }
 
     #[test]
@@ -662,30 +742,6 @@ mod tests {
     }
 
     #[test]
-    fn db_methods_return_connection_errors_for_bad_dsn() {
-        let db = ExasolDb::new(config("definitely-not-a-dsn", "PUBLIC", "SCHED_TASKS"))
-            .expect("constructor only validates non-empty values");
-
-        let last_changed_err = db.get_last_changed().unwrap_err();
-        assert!(matches!(
-            last_changed_err,
-            DbError::Connection { operation, .. } if operation == "get_last_changed"
-        ));
-
-        let load_tasks_err = db.load_tasks().unwrap_err();
-        assert!(matches!(
-            load_tasks_err,
-            DbError::Connection { operation, .. } if operation == "load_tasks"
-        ));
-
-        let execute_err = db.execute_statement("SELECT 1").unwrap_err();
-        assert!(matches!(
-            execute_err,
-            DbError::Connection { operation, .. } if operation == "execute_statement"
-        ));
-    }
-
-    #[test]
     fn decode_last_changed_from_batches_handles_empty_missing_and_valid_batches() {
         let empty = RecordBatch::try_from_iter(vec![(
             "LAST_CHANGED",
@@ -738,27 +794,114 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn write_history_is_noop_in_stage_1b() {
-        let db = ExasolDb::new(config(
-            "exasol://sys:pw@localhost:8563?tls=0",
-            "PUBLIC",
-            "SCHED_TASKS",
-        ))
-        .expect("constructor should accept non-empty values");
-
-        let event = HistoryEvent {
+    fn sample_event() -> HistoryEvent {
+        HistoryEvent {
             run_id: Uuid::nil(),
             graph_run_id: None,
             task_id: "task_1".to_string(),
-            graph_phase: "ROOT".to_string(),
-            scheduled_for: None,
+            graph_phase: "MAIN".to_string(),
+            scheduled_for: Some(Utc.with_ymd_and_hms(2026, 1, 2, 3, 0, 0).unwrap()),
             started_at: Utc.with_ymd_and_hms(2026, 1, 2, 3, 4, 5).unwrap(),
-            finished_at: None,
+            finished_at: Some(Utc.with_ymd_and_hms(2026, 1, 2, 3, 4, 6).unwrap()),
             status: "SUCCEEDED".to_string(),
             error_message: None,
-        };
+        }
+    }
 
-        assert!(db.write_history(&event).is_ok());
+    #[test]
+    fn write_history_sql_contains_all_required_fields() {
+        let event = sample_event();
+        let sql = build_write_history_sql("PUBLIC", "SCHED_HISTORY", &event);
+        assert!(sql.contains("INSERT INTO \"PUBLIC\".\"SCHED_HISTORY\""));
+        assert!(sql.contains("RUN_ID, GRAPH_RUN_ID, TASK_ID, GRAPH_PHASE"));
+        assert!(sql.contains("SCHEDULED_FOR, STARTED_AT, FINISHED_AT, STATUS, ERROR_MESSAGE"));
+        assert!(sql.contains(&format!("'{}'", Uuid::nil())));
+        assert!(sql.contains("'task_1'"));
+        assert!(sql.contains("'MAIN'"));
+        assert!(sql.contains("'SUCCEEDED'"));
+        assert!(sql.contains("TIMESTAMP '2026-01-02 03:00:00.000'"));
+        assert!(sql.contains("TIMESTAMP '2026-01-02 03:04:05.000'"));
+        assert!(sql.contains("TIMESTAMP '2026-01-02 03:04:06.000'"));
+    }
+
+    #[test]
+    fn write_history_sql_uses_null_for_absent_optional_fields() {
+        let mut event = sample_event();
+        event.graph_run_id = None;
+        event.scheduled_for = None;
+        event.finished_at = None;
+        event.error_message = None;
+        let sql = build_write_history_sql("PUBLIC", "SCHED_HISTORY", &event);
+        // Four NULLs: graph_run_id, scheduled_for, finished_at, error_message
+        assert_eq!(sql.matches("NULL").count(), 4);
+    }
+
+    #[test]
+    fn write_history_sql_includes_graph_run_id_when_set() {
+        let mut event = sample_event();
+        let gid = Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
+        event.graph_run_id = Some(gid);
+        let sql = build_write_history_sql("PUBLIC", "SCHED_HISTORY", &event);
+        assert!(sql.contains("'11111111-1111-1111-1111-111111111111'"));
+    }
+
+    #[test]
+    fn write_history_sql_includes_error_message_when_set() {
+        let mut event = sample_event();
+        event.status = "FAILED".to_string();
+        event.error_message = Some("it broke".to_string());
+        let sql = build_write_history_sql("PUBLIC", "SCHED_HISTORY", &event);
+        assert!(sql.contains("'FAILED'"));
+        assert!(sql.contains("'it broke'"));
+    }
+
+    #[test]
+    fn write_history_sql_escapes_single_quotes_in_error_message() {
+        let mut event = sample_event();
+        event.error_message = Some("can't connect".to_string());
+        let sql = build_write_history_sql("PUBLIC", "SCHED_HISTORY", &event);
+        assert!(sql.contains("'can''t connect'"));
+    }
+
+    #[test]
+    fn write_history_sql_quotes_schema_and_table_identifiers() {
+        let event = sample_event();
+        let sql = build_write_history_sql("MY\"SCHEMA", "HIST\"TABLE", &event);
+        assert!(sql.contains("\"MY\"\"SCHEMA\".\"HIST\"\"TABLE\""));
+    }
+
+    #[test]
+    fn write_history_returns_connection_error_for_bad_dsn() {
+        let db = ExasolDb::new(config("definitely-not-a-dsn", "PUBLIC", "SCHED_TASKS"))
+            .expect("constructor only validates non-empty values");
+        let err = db.write_history(&sample_event()).unwrap_err();
+        assert!(matches!(
+            err,
+            DbError::Connection { operation, .. } if operation == "write_history"
+        ));
+    }
+
+    #[test]
+    fn db_methods_return_connection_errors_for_bad_dsn() {
+        let db = ExasolDb::new(config("definitely-not-a-dsn", "PUBLIC", "SCHED_TASKS"))
+            .expect("constructor only validates non-empty values");
+
+        let last_changed_err = db.get_last_changed().unwrap_err();
+        assert!(matches!(
+            last_changed_err,
+            DbError::Connection { operation, .. } if operation == "get_last_changed"
+        ));
+
+        let load_tasks_err = db.load_tasks().unwrap_err();
+        assert!(matches!(
+            load_tasks_err,
+            DbError::Connection { operation, .. } if operation == "load_tasks"
+        ));
+
+        let execute_err = db.execute_statement("SELECT 1").unwrap_err();
+        assert!(matches!(
+            execute_err,
+            DbError::Connection { operation, .. } if operation == "execute_statement"
+        ));
     }
 }

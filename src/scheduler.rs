@@ -6,8 +6,10 @@ use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
 
+use uuid::Uuid;
+
 use crate::db::{DbError, SchedulerDb};
-use crate::model::TaskRow;
+use crate::model::{HistoryEvent, TaskRow};
 use crate::schedule::{LocalTimeZone, ParsedSchedule};
 use crate::time::Clock;
 
@@ -168,7 +170,33 @@ impl Scheduler {
 
         while let Some(due) = self.state.pop_due_root(now, self.local_tz) {
             tracing::info!(task_id = due.task_id.as_str(), scheduled_for = %due.scheduled_for, "executing root task");
-            self.db.execute_statement(&due.statement)?;
+
+            let run_id = Uuid::new_v4();
+            let started_at = self.clock.now();
+            let exec_result = self.db.execute_statement(&due.statement);
+            let finished_at = self.clock.now();
+
+            let (status, error_message) = match &exec_result {
+                Ok(_) => ("SUCCEEDED".to_string(), None),
+                Err(e) => ("FAILED".to_string(), Some(e.to_string())),
+            };
+
+            let event = HistoryEvent {
+                run_id,
+                graph_run_id: None,
+                task_id: due.task_id.clone(),
+                graph_phase: "MAIN".to_string(),
+                scheduled_for: Some(due.scheduled_for),
+                started_at,
+                finished_at: Some(finished_at),
+                status,
+                error_message,
+            };
+            if let Err(e) = self.db.write_history(&event) {
+                tracing::warn!(task_id = due.task_id.as_str(), error = %e, "write_history failed");
+            }
+
+            exec_result?;
             executed += 1;
         }
 

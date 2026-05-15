@@ -25,9 +25,12 @@ pub struct ProgrammableDb {
     clock: Arc<FakeClock>,
     failures_by_statement: Mutex<HashMap<String, String>>,
     executions: Mutex<Vec<ExecutionRecord>>,
+    history_events: Mutex<Vec<HistoryEvent>>,
+    write_history_error: Mutex<Option<String>>,
     get_last_changed_calls: AtomicUsize,
     load_tasks_calls: AtomicUsize,
     execute_calls: AtomicUsize,
+    write_history_calls: AtomicUsize,
 }
 
 impl ProgrammableDb {
@@ -39,9 +42,12 @@ impl ProgrammableDb {
             clock,
             failures_by_statement: Mutex::new(HashMap::new()),
             executions: Mutex::new(Vec::new()),
+            history_events: Mutex::new(Vec::new()),
+            write_history_error: Mutex::new(None),
             get_last_changed_calls: AtomicUsize::new(0),
             load_tasks_calls: AtomicUsize::new(0),
             execute_calls: AtomicUsize::new(0),
+            write_history_calls: AtomicUsize::new(0),
         }
     }
 
@@ -80,6 +86,18 @@ impl ProgrammableDb {
         self.executions.lock().expect("executions poisoned").clone()
     }
 
+    pub fn history_events(&self) -> Vec<HistoryEvent> {
+        self.history_events.lock().expect("history_events poisoned").clone()
+    }
+
+    pub fn set_write_history_error(&self, message: &str) {
+        *self.write_history_error.lock().expect("write_history_error poisoned") = Some(message.to_string());
+    }
+
+    pub fn clear_write_history_error(&self) {
+        *self.write_history_error.lock().expect("write_history_error poisoned") = None;
+    }
+
     pub fn get_last_changed_calls(&self) -> usize {
         self.get_last_changed_calls.load(Ordering::SeqCst)
     }
@@ -90,6 +108,10 @@ impl ProgrammableDb {
 
     pub fn execute_calls(&self) -> usize {
         self.execute_calls.load(Ordering::SeqCst)
+    }
+
+    pub fn write_history_calls(&self) -> usize {
+        self.write_history_calls.load(Ordering::SeqCst)
     }
 
     fn active_version_data(&self) -> DbVersion {
@@ -132,7 +154,20 @@ impl SchedulerDb for ProgrammableDb {
         Ok(())
     }
 
-    fn write_history(&self, _event: &HistoryEvent) -> Result<(), DbError> {
+    fn write_history(&self, event: &HistoryEvent) -> Result<(), DbError> {
+        self.write_history_calls.fetch_add(1, Ordering::SeqCst);
+        self.history_events
+            .lock()
+            .expect("history_events poisoned")
+            .push(event.clone());
+        if let Some(message) = self
+            .write_history_error
+            .lock()
+            .expect("write_history_error poisoned")
+            .clone()
+        {
+            return Err(DbError::Other(message));
+        }
         Ok(())
     }
 }
