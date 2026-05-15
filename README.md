@@ -28,15 +28,6 @@ With Exasol Scheduler, task definitions live in a standard Exasol table:
 
 ---
 
-## How it works
-
-1. The scheduler polls `SYS.EXA_ALL_OBJECTS` to detect when the task table last changed.
-2. If it changed, reload all task rows and recompute the schedule.
-3. For every task whose next scheduled time has passed, execute its SQL statement, walk its dependency graph, and write a result row to the history table.
-4. Sleep until the next task is due (at most `POLL_INTERVAL_SECS` seconds).
-
----
-
 ## Quick Start
 
 ### 1. Start the scheduler
