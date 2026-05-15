@@ -221,9 +221,15 @@ fn does_not_execute_disabled_child_finalizer_or_invalid_root_tasks() {
     let second = scheduler.tick().unwrap();
     assert_eq!(second.executed_roots, 1);
 
+    // Stage-3: good_root fires, and its child + finalizer execute as part of the graph run.
+    // Disabled, invalid-tz, and invalid-cron tasks are never executed independently.
     let executions = db.executions();
-    assert_eq!(executions.len(), 1);
+    assert_eq!(executions.len(), 3, "root + child + finalizer");
     assert_eq!(executions[0].statement, "SQL GOOD");
+    let graph_stmts: std::collections::HashSet<_> =
+        executions[1..].iter().map(|r| r.statement.as_str()).collect();
+    assert!(graph_stmts.contains("SQL CHILD"));
+    assert!(graph_stmts.contains("SQL FINALIZER"));
 }
 
 #[test]

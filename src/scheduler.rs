@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use std::cmp::Ordering;
-use std::collections::{BTreeSet, BinaryHeap, HashMap};
+use std::collections::{BTreeSet, BinaryHeap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,6 +14,7 @@ use crate::schedule::{LocalTimeZone, ParsedSchedule};
 use crate::time::Clock;
 
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(10);
+const MAX_GRAPH_DEPTH: usize = 20;
 
 #[derive(Debug, Error)]
 pub enum SchedulerError {
@@ -31,6 +32,7 @@ pub struct ReloadStats {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TickResult {
     pub executed_roots: usize,
+    pub failed_children: usize,
     pub reload: Option<ReloadStats>,
 }
 
@@ -95,10 +97,11 @@ impl Scheduler {
     pub fn tick(&mut self) -> Result<TickResult, SchedulerError> {
         let now = self.clock.now();
         let reload = self.reload_if_changed(now)?;
-        let executed_roots = self.execute_due_roots(now)?;
+        let (executed_roots, failed_children) = self.execute_due_roots(now)?;
 
         Ok(TickResult {
             executed_roots,
+            failed_children,
             reload,
         })
     }
@@ -133,6 +136,7 @@ impl Scheduler {
             let result = self.tick()?;
             tracing::debug!(
                 executed_roots = result.executed_roots,
+                failed_children = result.failed_children,
                 reload = ?result.reload,
                 "tick completed"
             );
@@ -165,48 +169,313 @@ impl Scheduler {
         Ok(Some(stats))
     }
 
-    fn execute_due_roots(&mut self, now: DateTime<Utc>) -> Result<usize, SchedulerError> {
+    fn execute_due_roots(&mut self, now: DateTime<Utc>) -> Result<(usize, usize), SchedulerError> {
         let mut executed = 0usize;
+        let mut total_failed_children = 0usize;
 
         while let Some(due) = self.state.pop_due_root(now, self.local_tz) {
-            tracing::info!(task_id = due.task_id.as_str(), scheduled_for = %due.scheduled_for, "executing root task");
+            tracing::info!(
+                task_id = due.task_id.as_str(),
+                scheduled_for = %due.scheduled_for,
+                "executing graph run"
+            );
 
-            let run_id = Uuid::new_v4();
-            let started_at = self.clock.now();
-            let exec_result = self.db.execute_statement(&due.statement);
-            let finished_at = self.clock.now();
-
-            let (status, error_message) = match &exec_result {
-                Ok(_) => ("SUCCEEDED".to_string(), None),
-                Err(e) => ("FAILED".to_string(), Some(e.to_string())),
+            let graph_run_id = Uuid::new_v4();
+            let mut runner = GraphRunner {
+                db: &*self.db,
+                clock: &*self.clock,
+                snapshot: &self.state.snapshot,
+                children_of: &self.state.children_of,
+                finalizers_of: &self.state.finalizers_of,
+                graph_run_id,
+                failed_children: 0,
             };
+            let result = runner.run(&due);
+            total_failed_children += result.failed_children;
 
-            let event = HistoryEvent {
-                run_id,
-                graph_run_id: None,
-                task_id: due.task_id.clone(),
-                graph_phase: "MAIN".to_string(),
-                scheduled_for: Some(due.scheduled_for),
-                started_at,
-                finished_at: Some(finished_at),
-                status,
-                error_message,
-            };
-            if let Err(e) = self.db.write_history(&event) {
-                tracing::warn!(task_id = due.task_id.as_str(), error = %e, "write_history failed");
+            if result.failed_children > 0 {
+                tracing::warn!(
+                    task_id = due.task_id.as_str(),
+                    graph_run_id = %graph_run_id,
+                    failed_children = result.failed_children,
+                    "graph run completed with child failures"
+                );
             }
 
-            exec_result?;
+            if let Some(err) = result.root_err {
+                return Err(err);
+            }
             executed += 1;
         }
 
-        Ok(executed)
+        Ok((executed, total_failed_children))
     }
 }
+
+// --- DAG index construction ---
+
+fn find_cycles(snapshot: &HashMap<String, TaskDef>) -> HashSet<String> {
+    let mut in_cycle: HashSet<String> = HashSet::new();
+    let mut done: HashSet<String> = HashSet::new();
+
+    for start_id in snapshot.keys() {
+        if done.contains(start_id.as_str()) {
+            continue;
+        }
+
+        let mut path: Vec<String> = Vec::new();
+        let mut current = start_id.clone();
+
+        loop {
+            if done.contains(&current) {
+                break;
+            }
+            if let Some(pos) = path.iter().position(|n| n == &current) {
+                for node in &path[pos..] {
+                    in_cycle.insert(node.clone());
+                }
+                in_cycle.insert(current.clone());
+                break;
+            }
+
+            path.push(current.clone());
+
+            let next = snapshot
+                .get(&current)
+                .and_then(|t| t.after.clone())
+                .filter(|parent| snapshot.contains_key(parent));
+
+            match next {
+                Some(parent) => current = parent,
+                None => break,
+            }
+        }
+
+        for node in path {
+            done.insert(node);
+        }
+    }
+
+    in_cycle
+}
+
+pub(crate) fn build_dag_indexes(
+    snapshot: &HashMap<String, TaskDef>,
+) -> (HashMap<String, Vec<String>>, HashMap<String, Vec<String>>) {
+    let invalid = find_cycles(snapshot);
+
+    let mut children_of: HashMap<String, Vec<String>> = HashMap::new();
+    let mut finalizers_of: HashMap<String, Vec<String>> = HashMap::new();
+
+    for (task_id, task) in snapshot {
+        if invalid.contains(task_id) {
+            continue;
+        }
+        let Some(parent_id) = &task.after else {
+            continue;
+        };
+        if !snapshot.contains_key(parent_id) {
+            continue; // orphan
+        }
+        if invalid.contains(parent_id) {
+            continue;
+        }
+        if task.is_final {
+            finalizers_of
+                .entry(parent_id.clone())
+                .or_default()
+                .push(task_id.clone());
+        } else {
+            children_of
+                .entry(parent_id.clone())
+                .or_default()
+                .push(task_id.clone());
+        }
+    }
+
+    for vec in children_of.values_mut() {
+        vec.sort();
+    }
+    for vec in finalizers_of.values_mut() {
+        vec.sort();
+    }
+
+    (children_of, finalizers_of)
+}
+
+// --- GraphRunner ---
+
+struct GraphRunResult {
+    root_err: Option<SchedulerError>,
+    failed_children: usize,
+}
+
+struct GraphRunner<'a> {
+    db: &'a dyn SchedulerDb,
+    clock: &'a dyn Clock,
+    snapshot: &'a HashMap<String, TaskDef>,
+    children_of: &'a HashMap<String, Vec<String>>,
+    finalizers_of: &'a HashMap<String, Vec<String>>,
+    graph_run_id: Uuid,
+    failed_children: usize,
+}
+
+impl<'a> GraphRunner<'a> {
+    fn run(&mut self, due: &DueRoot) -> GraphRunResult {
+        let started_at = self.clock.now();
+        let exec_result = self.db.execute_statement(&due.statement);
+        let finished_at = self.clock.now();
+
+        let (status, error_message, root_err) = match exec_result {
+            Ok(_) => ("SUCCEEDED".to_string(), None, None),
+            Err(e) => {
+                let msg = e.to_string();
+                let err = SchedulerError::from(e);
+                ("FAILED".to_string(), Some(msg), Some(err))
+            }
+        };
+
+        let event = HistoryEvent {
+            run_id: Uuid::new_v4(),
+            graph_run_id: Some(self.graph_run_id),
+            task_id: due.task_id.clone(),
+            graph_phase: "MAIN".to_string(),
+            scheduled_for: Some(due.scheduled_for),
+            started_at,
+            finished_at: Some(finished_at),
+            status: status.clone(),
+            error_message,
+        };
+        if let Err(e) = self.db.write_history(&event) {
+            tracing::warn!(task_id = due.task_id.as_str(), error = %e, "write_history failed");
+        }
+
+        let children = self.children_of.get(&due.task_id).cloned().unwrap_or_default();
+        for child_id in children {
+            self.execute_node(&child_id, &status, 1);
+        }
+
+        let finalizers = self.finalizers_of.get(&due.task_id).cloned().unwrap_or_default();
+        for finalizer_id in finalizers {
+            self.execute_finalizer(&finalizer_id, 1);
+        }
+
+        GraphRunResult {
+            root_err,
+            failed_children: self.failed_children,
+        }
+    }
+
+    fn execute_node(&mut self, task_id: &str, parent_status: &str, depth: usize) {
+        if depth > MAX_GRAPH_DEPTH {
+            tracing::warn!(task_id, "max graph depth exceeded, skipping node");
+            return;
+        }
+
+        let Some(task) = self.snapshot.get(task_id).cloned() else {
+            return;
+        };
+
+        let (status, started_at, finished_at, error_message) = if parent_status != "SUCCEEDED" {
+            let t = self.clock.now();
+            ("SKIPPED".to_string(), t, None, None)
+        } else {
+            let started_at = self.clock.now();
+            let exec_result = self.db.execute_statement(&task.statement);
+            let finished_at = self.clock.now();
+            match exec_result {
+                Ok(_) => ("SUCCEEDED".to_string(), started_at, Some(finished_at), None),
+                Err(e) => {
+                    self.failed_children += 1;
+                    (
+                        "FAILED".to_string(),
+                        started_at,
+                        Some(finished_at),
+                        Some(e.to_string()),
+                    )
+                }
+            }
+        };
+
+        let event = HistoryEvent {
+            run_id: Uuid::new_v4(),
+            graph_run_id: Some(self.graph_run_id),
+            task_id: task_id.to_string(),
+            graph_phase: "MAIN".to_string(),
+            scheduled_for: None,
+            started_at,
+            finished_at,
+            status: status.clone(),
+            error_message,
+        };
+        if let Err(e) = self.db.write_history(&event) {
+            tracing::warn!(task_id, error = %e, "write_history failed");
+        }
+
+        let children = self.children_of.get(task_id).cloned().unwrap_or_default();
+        for child_id in children {
+            self.execute_node(&child_id, &status, depth + 1);
+        }
+
+        // Finalizers always run regardless of this node's status
+        let finalizers = self.finalizers_of.get(task_id).cloned().unwrap_or_default();
+        for finalizer_id in finalizers {
+            self.execute_finalizer(&finalizer_id, depth + 1);
+        }
+    }
+
+    fn execute_finalizer(&mut self, task_id: &str, depth: usize) {
+        if depth > MAX_GRAPH_DEPTH {
+            tracing::warn!(task_id, "max graph depth exceeded, skipping finalizer");
+            return;
+        }
+
+        let Some(task) = self.snapshot.get(task_id).cloned() else {
+            return;
+        };
+
+        let started_at = self.clock.now();
+        let exec_result = self.db.execute_statement(&task.statement);
+        let finished_at = self.clock.now();
+
+        let (status, error_message) = match exec_result {
+            Ok(_) => ("SUCCEEDED".to_string(), None),
+            Err(e) => {
+                self.failed_children += 1;
+                ("FAILED".to_string(), Some(e.to_string()))
+            }
+        };
+
+        let event = HistoryEvent {
+            run_id: Uuid::new_v4(),
+            graph_run_id: Some(self.graph_run_id),
+            task_id: task_id.to_string(),
+            graph_phase: "FINAL".to_string(),
+            scheduled_for: None,
+            started_at,
+            finished_at: Some(finished_at),
+            status: status.clone(),
+            error_message,
+        };
+        if let Err(e) = self.db.write_history(&event) {
+            tracing::warn!(task_id, error = %e, "write_history failed");
+        }
+
+        // Finalizers can have non-finalizer sub-tasks
+        let children = self.children_of.get(task_id).cloned().unwrap_or_default();
+        for child_id in children {
+            self.execute_node(&child_id, &status, depth + 1);
+        }
+    }
+}
+
+// --- SchedulerState ---
 
 #[derive(Default)]
 struct SchedulerState {
     snapshot: HashMap<String, TaskDef>,
+    children_of: HashMap<String, Vec<String>>,
+    finalizers_of: HashMap<String, Vec<String>>,
     roots: HashMap<String, RootState>,
     heap: BinaryHeap<HeapItem>,
 }
@@ -247,6 +516,10 @@ impl SchedulerState {
                 }
             }
         }
+
+        let (children_of, finalizers_of) = build_dag_indexes(&self.snapshot);
+        self.children_of = children_of;
+        self.finalizers_of = finalizers_of;
 
         ReloadStats {
             added: diff.added.len(),
@@ -297,7 +570,6 @@ impl SchedulerState {
         }
 
         let Some(next_due) = task.next_due_after(now, local_tz) else {
-            // Invalid or non-computable schedule is treated as inactive for Stage-1.
             self.roots.remove(task_id);
             return;
         };
@@ -383,19 +655,19 @@ struct DueRoot {
 }
 
 #[derive(Debug, Clone)]
-struct TaskDef {
-    task_id: String,
-    enabled: bool,
-    parsed_schedule: Option<ParsedSchedule>,
-    statement: String,
-    after: Option<String>,
-    is_final: bool,
-    schedule_fingerprint: u64,
-    fingerprint: u64,
+pub(crate) struct TaskDef {
+    pub(crate) task_id: String,
+    pub(crate) enabled: bool,
+    pub(crate) parsed_schedule: Option<ParsedSchedule>,
+    pub(crate) statement: String,
+    pub(crate) after: Option<String>,
+    pub(crate) is_final: bool,
+    pub(crate) schedule_fingerprint: u64,
+    pub(crate) fingerprint: u64,
 }
 
 impl TaskDef {
-    fn from_row(row: TaskRow) -> Self {
+    pub(crate) fn from_row(row: TaskRow) -> Self {
         let after = row.after.and_then(|value| {
             if value.trim().is_empty() {
                 None
@@ -574,4 +846,108 @@ fn duration_until(now: DateTime<Utc>, due: DateTime<Utc>) -> Duration {
     }
 
     (due - now).to_std().unwrap_or(Duration::from_millis(1))
+}
+
+#[cfg(test)]
+mod dag_index_tests {
+    use super::*;
+
+    fn make_task(task_id: &str, after: Option<&str>, is_final: bool) -> TaskDef {
+        TaskDef {
+            task_id: task_id.to_string(),
+            enabled: true,
+            parsed_schedule: None,
+            statement: format!("SELECT {task_id}"),
+            after: after.map(str::to_string),
+            is_final,
+            schedule_fingerprint: 0,
+            fingerprint: 0,
+        }
+    }
+
+    fn snapshot(tasks: Vec<TaskDef>) -> HashMap<String, TaskDef> {
+        tasks.into_iter().map(|t| (t.task_id.clone(), t)).collect()
+    }
+
+    #[test]
+    fn index_build_assigns_children_and_finalizers_correctly() {
+        let snap = snapshot(vec![
+            make_task("root", None, false),
+            make_task("child_a", Some("root"), false),
+            make_task("child_b", Some("root"), false),
+            make_task("fin", Some("root"), true),
+        ]);
+        let (children, finalizers) = build_dag_indexes(&snap);
+        let mut kids = children["root"].clone();
+        kids.sort();
+        assert_eq!(kids, vec!["child_a", "child_b"]);
+        assert_eq!(finalizers["root"], vec!["fin"]);
+        assert!(!children.contains_key("child_a"));
+    }
+
+    #[test]
+    fn index_build_sorts_children_by_task_id_for_determinism() {
+        let snap = snapshot(vec![
+            make_task("root", None, false),
+            make_task("z_child", Some("root"), false),
+            make_task("a_child", Some("root"), false),
+            make_task("m_child", Some("root"), false),
+        ]);
+        let (children, _) = build_dag_indexes(&snap);
+        assert_eq!(children["root"], vec!["a_child", "m_child", "z_child"]);
+    }
+
+    #[test]
+    fn orphan_task_is_excluded_from_indexes() {
+        let snap = snapshot(vec![
+            make_task("root", None, false),
+            make_task("orphan", Some("nonexistent_parent"), false),
+        ]);
+        let (children, finalizers) = build_dag_indexes(&snap);
+        assert!(children.is_empty());
+        assert!(finalizers.is_empty());
+    }
+
+    #[test]
+    fn cycle_detection_excludes_cycle_members_from_indexes() {
+        // x → y → x (mutual cycle)
+        let snap2 = snapshot(vec![
+            make_task("root", None, false),
+            make_task("x", Some("y"), false), // x depends on y
+            make_task("y", Some("x"), false), // y depends on x (cycle!)
+        ]);
+        let (children, _) = build_dag_indexes(&snap2);
+        // x and y are in a cycle, neither should appear in indexes
+        assert!(!children.contains_key("x"));
+        assert!(!children.contains_key("y"));
+        // root has no children (x and y are excluded)
+        assert!(!children.contains_key("root"));
+    }
+
+    #[test]
+    fn two_node_mutual_cycle_detected() {
+        let snap = snapshot(vec![
+            make_task("a", Some("b"), false),
+            make_task("b", Some("a"), false),
+        ]);
+        let cycles = find_cycles(&snap);
+        assert!(cycles.contains("a"));
+        assert!(cycles.contains("b"));
+    }
+
+    #[test]
+    fn no_false_positive_cycles_in_valid_dag() {
+        let snap = snapshot(vec![
+            make_task("root", None, false),
+            make_task("child_a", Some("root"), false),
+            make_task("child_b", Some("root"), false),
+            make_task("grandchild", Some("child_a"), false),
+        ]);
+        let cycles = find_cycles(&snap);
+        assert!(cycles.is_empty());
+
+        let (children, _) = build_dag_indexes(&snap);
+        assert_eq!(children["root"], vec!["child_a", "child_b"]);
+        assert_eq!(children["child_a"], vec!["grandchild"]);
+    }
 }

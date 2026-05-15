@@ -59,7 +59,7 @@ fn history_is_written_after_successful_root_execution() {
     assert_eq!(e.scheduled_for, Some(dt(2026, 2, 1, 12, 1, 0)));
     assert!(e.finished_at.is_some());
     assert!(e.started_at <= e.finished_at.unwrap());
-    assert!(e.graph_run_id.is_none());
+    assert!(e.graph_run_id.is_some());
 }
 
 // --- history written on failed execution, error still propagates ---
