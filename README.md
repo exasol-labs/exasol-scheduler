@@ -1,325 +1,225 @@
-# Exasol Lightweight Task Scheduler
+<div align="center">
 
-A lightweight, database-native scheduler for Exasol, implemented in Rust.
+# Exasol Scheduler
 
-Design goals:
-- stateless operation
-- deterministic behavior
-- mockable architecture
-- incremental reload (diff, not full rebuild)
+**Table-driven SQL job scheduling for Exasol**
 
-## Current Status
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org)
+[![Build](https://img.shields.io/badge/build-passing-brightgreen.svg)](#)
 
-The project implements **Stage-1 + Stage-1b**:
-- Stage-1 scheduler core:
-  - root-only CRON scheduling
-  - incremental snapshot diff
-  - generation-token heap invalidation
-  - no catch-up on restart
-- Stage-1b Exasol support:
-  - real `ExasolDb` adapter using `exarrow-rs`
-  - runnable binary (`src/main.rs`) with polling loop
-  - env-driven configuration
+*Define jobs in SQL. Run them with SQL. Audit them with SQL.*
 
-Not implemented yet:
-- Stage-2 history writes (`SCHED_HISTORY`)
-- Stage-3 DAG traversal (`AFTER`) and finalizer execution (`IS_FINAL`)
-- schedule kinds beyond `CRON`
-- security - tasks are not tied to user roles
+</div>
 
-## Audience Guide
+---
 
-- If you are a **database user**, see `Database User Guide`.
-- If you are an **operator/admin**, see `Operator Guide`.
+## Why a table-driven scheduler?
 
-## Database User Guide
+Most schedulers store their task definitions in a proprietary database or configuration files that your SQL tooling cannot query. This creates a gap between "what data exists" and "what code runs against it."
 
-### Table You Maintain
+With Exasol Scheduler, task definitions live in a standard Exasol table:
 
-The scheduler reads task definitions from `SCHED_TASKS`.
+- **Full SQL access.** Query, join, and report on task definitions and execution history with the same tools you use for your data warehouse.
+- **Instant hot-reload.** Add, remove, or change a task with a plain `UPDATE` or `INSERT`. The scheduler notices on its next poll — no restart required.
+- **Dependency graphs.** Chain tasks via the `AFTER` column to express multi-step pipelines. The scheduler skips downstream steps on failure and always runs designated finalizers for cleanup and notifications.
+- **Auditable history.** Every execution is written to a history table in the same database. No external log aggregator needed.
+- **Zero infrastructure.** A single stateless binary. No message broker, no controller plane, no distributed state.
+
+---
+
+## How it works
+
+1. The scheduler polls `SYS.EXA_ALL_OBJECTS` to detect when the task table last changed.
+2. If it changed, reload all task rows and recompute the schedule.
+3. For every task whose next scheduled time has passed, execute its SQL statement, walk its dependency graph, and write a result row to the history table.
+4. Sleep until the next task is due (at most `POLL_INTERVAL_SECS` seconds).
+
+---
+
+## Quick Start
+
+### 1. Create the tables
 
 ```sql
-CREATE TABLE SCHED_TASKS (
-  TASK_ID        VARCHAR(128) NOT NULL,
-  ENABLED        BOOLEAN DEFAULT TRUE,
-  SCHEDULE       VARCHAR(512) NOT NULL,
-  STATEMENT      VARCHAR(2000000) NOT NULL,
-  AFTER          VARCHAR(128),
-  IS_FINAL       BOOLEAN DEFAULT FALSE,
-  COMMENT        VARCHAR(2000),
-  PRIMARY KEY (TASK_ID)
+CREATE TABLE PUBLIC.SCHED_TASKS (
+    "TASK_ID"   VARCHAR(128)     NOT NULL,
+    "ENABLED"   BOOLEAN          DEFAULT TRUE,
+    "SCHEDULE"  VARCHAR(512)     NOT NULL,
+    "STATEMENT" VARCHAR(2000000) NOT NULL,
+    "AFTER"     VARCHAR(128),
+    "IS_FINAL"  BOOLEAN          DEFAULT FALSE,
+    "COMMENT"   VARCHAR(2000),
+    PRIMARY KEY ("TASK_ID")
+);
+
+CREATE TABLE PUBLIC.SCHED_HISTORY (
+    "RUN_ID"        VARCHAR(36)      NOT NULL,
+    "GRAPH_RUN_ID"  VARCHAR(36),
+    "TASK_ID"       VARCHAR(128)     NOT NULL,
+    "GRAPH_PHASE"   VARCHAR(16)      NOT NULL,
+    "SCHEDULED_FOR" TIMESTAMP,
+    "STARTED_AT"    TIMESTAMP        NOT NULL,
+    "FINISHED_AT"   TIMESTAMP,
+    "STATUS"        VARCHAR(16)      NOT NULL,
+    "ERROR_MESSAGE" VARCHAR(2000000),
+    PRIMARY KEY ("RUN_ID")
 );
 ```
 
-### Stage-1 Execution Semantics
-
-A row is runnable in Stage-1 only if:
-- `ENABLED = TRUE`
-- `AFTER IS NULL`
-- `IS_FINAL = FALSE`
-- `SCHEDULE` parses as supported CRON
-
-Rows that are disabled, child tasks, finalizers, or invalid schedules are not executed.
-
-### Supported Schedule Grammar
-
-```text
-CRON <sec> <min> <hour> <dom> <mon> <dow> [TZ=<timezone>]
-```
-
-Rules:
-- `CRON` prefix is required
-- exactly 6 cron fields
-- `TZ=UTC` or IANA timezone (for example `Europe/Copenhagen`)
-- if `TZ` is omitted, scheduler uses configured local timezone behavior
-
-Examples:
-
-```text
-CRON 0 * * * * *
-CRON 0 */5 * * * * TZ=UTC
-CRON 0 0 9 * * * TZ=Europe/Copenhagen
-```
-
-### Typical SQL Operations
-
-Create a root task:
+### 2. Add your first task
 
 ```sql
-INSERT INTO SCHED_TASKS (TASK_ID, ENABLED, SCHEDULE, STATEMENT)
+INSERT INTO PUBLIC.SCHED_TASKS ("TASK_ID", "SCHEDULE", "STATEMENT")
 VALUES (
-  'refresh_daily_sales',
-  TRUE,
-  'CRON 0 0 2 * * * TZ=UTC',
-  'CALL ETL.REFRESH_DAILY_SALES()'
+    'hourly_cleanup',
+    'CRON 0 0 * * * * TZ=UTC',
+    'DELETE FROM MY_SCHEMA.STAGING WHERE created_at < ADD_DAYS(CURRENT_TIMESTAMP, -7)'
 );
 ```
 
-Disable a task:
+### 3. Start the scheduler
+
+```bash
+# Positional DSN argument:
+exasol_scheduler "exasol://myuser:mypassword@exasol-host:8563?tls=1&validateservercertificate=0"
+
+# Or via environment variables:
+export EXA_HOST=exasol-host
+export EXA_USER=myuser
+export EXA_PASSWORD=mypassword
+export EXA_TLS=true
+exasol_scheduler
+```
+
+See [docs/configuration.md](docs/configuration.md) for the full list of environment variables.
+
+---
+
+## Defining tasks
+
+Tasks live in `SCHED_TASKS`. Each row is one executable unit.
+
+| Column | Description |
+|---|---|
+| `TASK_ID` | Unique identifier. Child tasks refer to their parent by this name. |
+| `ENABLED` | Set to `FALSE` to pause without deleting. Default `TRUE`. |
+| `SCHEDULE` | When to run. See [Schedule syntax](#schedule-syntax) below. |
+| `STATEMENT` | The SQL to execute — any valid Exasol SQL. |
+| `AFTER` | Parent task's `TASK_ID`. `NULL` for independently scheduled root tasks. |
+| `IS_FINAL` | When `TRUE`, this task always runs after its parent, even on failure. Default `FALSE`. |
+| `COMMENT` | Free-text description. Ignored by the scheduler. |
+
+### Root tasks
+
+A root task has no `AFTER` value and fires on its own cron schedule.
 
 ```sql
-UPDATE SCHED_TASKS
-SET ENABLED = FALSE
-WHERE TASK_ID = 'refresh_daily_sales';
+INSERT INTO PUBLIC.SCHED_TASKS ("TASK_ID", "SCHEDULE", "STATEMENT")
+VALUES ('load_sales', 'CRON 0 0 6 * * * TZ=Europe/Berlin', 'EXECUTE SCRIPT ETL.LOAD_SALES()');
 ```
 
-Change schedule:
+### Child tasks
+
+A child runs after its parent succeeds. Set `AFTER` to the parent's `TASK_ID`.
 
 ```sql
-UPDATE SCHED_TASKS
-SET SCHEDULE = 'CRON 0 30 2 * * * TZ=UTC'
-WHERE TASK_ID = 'refresh_daily_sales';
+-- Step 1: root
+INSERT INTO PUBLIC.SCHED_TASKS ("TASK_ID", "SCHEDULE", "STATEMENT")
+VALUES ('extract', 'CRON 0 0 2 * * * TZ=UTC', 'EXECUTE SCRIPT ETL.EXTRACT()');
+
+-- Step 2: runs only when extract succeeds
+INSERT INTO PUBLIC.SCHED_TASKS ("TASK_ID", "SCHEDULE", "STATEMENT", "AFTER")
+VALUES ('transform', 'CRON 0 0 2 * * * TZ=UTC', 'EXECUTE SCRIPT ETL.TRANSFORM()', 'extract');
+
+-- Step 3: runs only when transform succeeds
+INSERT INTO PUBLIC.SCHED_TASKS ("TASK_ID", "SCHEDULE", "STATEMENT", "AFTER")
+VALUES ('load', 'CRON 0 0 2 * * * TZ=UTC', 'EXECUTE SCRIPT ETL.LOAD()', 'transform');
 ```
 
-Change statement only:
+If `transform` fails, `load` is skipped and recorded as `SKIPPED` in the history table.
+
+### Finalizer tasks
+
+A finalizer has `IS_FINAL = TRUE` and always runs after its parent — even if the parent failed or was skipped. Useful for notifications and cleanup.
 
 ```sql
-UPDATE SCHED_TASKS
-SET STATEMENT = 'CALL ETL.REFRESH_DAILY_SALES_V2()'
-WHERE TASK_ID = 'refresh_daily_sales';
+INSERT INTO PUBLIC.SCHED_TASKS ("TASK_ID", "SCHEDULE", "STATEMENT", "AFTER", "IS_FINAL")
+VALUES ('notify', 'CRON 0 0 2 * * * TZ=UTC', 'EXECUTE SCRIPT ETL.SEND_STATUS()', 'extract', TRUE);
 ```
 
-Delete task:
+A parent can have multiple children and multiple finalizers. Children run first (alphabetical by `TASK_ID`), then finalizers run (also alphabetical). A failing finalizer does not stop its siblings.
+
+---
+
+## Schedule syntax
+
+```
+CRON <second> <minute> <hour> <day-of-month> <month> <day-of-week> [TZ=<timezone>]
+```
+
+Fields use standard cron syntax. The `TZ=` suffix accepts any [IANA timezone name](https://en.wikipedia.org/wiki/List_of_tz_database_time_zones); when omitted, the server's local timezone is used.
+
+| Schedule | Fires |
+|---|---|
+| `CRON 0 0 * * * * TZ=UTC` | Every hour on the hour (UTC) |
+| `CRON 0 0 6 * * * TZ=Europe/Berlin` | Daily at 06:00 Berlin time |
+| `CRON 0 0 9 * * 1-5 TZ=America/New_York` | Weekdays at 09:00 New York time |
+| `CRON 0 */15 * * * *` | Every 15 minutes (server local time) |
+| `CRON 0 30 23 L * * TZ=UTC` | Last day of each month at 23:30 UTC |
+
+---
+
+## Managing tasks
+
+Because tasks are just table rows, all management is plain SQL:
 
 ```sql
-DELETE FROM SCHED_TASKS
-WHERE TASK_ID = 'refresh_daily_sales';
+-- Pause and resume
+UPDATE PUBLIC.SCHED_TASKS SET "ENABLED" = FALSE WHERE "TASK_ID" = 'load_sales';
+UPDATE PUBLIC.SCHED_TASKS SET "ENABLED" = TRUE  WHERE "TASK_ID" = 'load_sales';
+
+-- Change schedule or statement
+UPDATE PUBLIC.SCHED_TASKS SET "SCHEDULE"  = 'CRON 0 0 7 * * * TZ=UTC' WHERE "TASK_ID" = 'load_sales';
+UPDATE PUBLIC.SCHED_TASKS SET "STATEMENT" = 'EXECUTE SCRIPT ETL.LOAD_SALES_V2()' WHERE "TASK_ID" = 'load_sales';
+
+-- Remove
+DELETE FROM PUBLIC.SCHED_TASKS WHERE "TASK_ID" = 'obsolete_job';
 ```
 
-### User-Facing Behavior Notes
+The scheduler picks up every change on its next poll — no restart required.
 
-- `COMMENT` changes are cosmetic and do not change execution behavior.
-- Invalid schedules are skipped.
-- Restart does not replay missed executions; next run is computed from current time.
+---
 
-## Operator Guide
+## Execution history
 
-### Architecture
+Every execution writes a row to `SCHED_HISTORY`. `STATUS` is `SUCCEEDED`, `FAILED`, or `SKIPPED`. All tasks in the same graph run share a `GRAPH_RUN_ID`.
 
-- single scheduler service (no leader election)
-- stateless process
-- Exasol stores durable configuration
-- scheduler core depends only on `SchedulerDb` trait
-
-Core files:
-- `src/scheduler.rs`: scheduler state, diff, heap scheduling, execution
-- `src/schedule.rs`: CRON + TZ parsing
-- `src/db/mod.rs`: DB trait + errors
-- `src/db/exasol.rs`: production Exasol adapter (exarrow-rs)
-- `src/main.rs`: service bootstrap and run loop
-
-### Runtime Flow
-
-The binary loop does:
-1. poll task-table last-changed timestamp (via `EXA_ALL_OBJECTS`)
-2. reload + diff if changed
-3. execute due root tasks
-4. sleep until `min(next_due, poll_interval)`
-
-### Environment Configuration
-
-Connection and table settings:
-- `EXA_DSN`
-- `EXA_HOST` (required if `EXA_DSN` is not set)
-- `EXA_PORT` (default `8563`)
-- `EXA_USER` (required if `EXA_DSN` is not set)
-- `EXA_PASSWORD` (required if `EXA_DSN` is not set)
-- `EXA_TLS` (default `false`)
-- `EXA_VALIDATE_SERVER_CERT` (default `true`)
-- `EXA_QUERY_TIMEOUT_SECS` (optional)
-
-Scheduler settings:
-- `EXA_SCHEMA` (default `PUBLIC`)
-- `EXA_TASKS_TABLE` (default `SCHED_TASKS`)
-- `POLL_INTERVAL_SECS` (default `10`)
-
-CLI override:
-- positional argument `exasol://...` (exarrow-rs DSN format)
-
-Precedence:
-1. positional DSN argument (`cargo run -- exasol://...`)
-2. `EXA_DSN`
-3. `EXA_HOST` + `EXA_PORT` + `EXA_USER` + `EXA_PASSWORD`
-
-If `EXA_SCHEMA` is not set and the DSN path includes a schema (`.../MY_SCHEMA`), that schema is used automatically.
-
-### Running Locally
-
-Build:
-
-```bash
-cargo build
+```sql
+-- All steps in the most recent run of a pipeline
+SELECT TASK_ID, GRAPH_PHASE, STATUS, ERROR_MESSAGE, STARTED_AT
+FROM PUBLIC.SCHED_HISTORY
+WHERE GRAPH_RUN_ID = (
+    SELECT GRAPH_RUN_ID FROM PUBLIC.SCHED_HISTORY
+    WHERE TASK_ID = 'extract'
+    ORDER BY STARTED_AT DESC LIMIT 1
+)
+ORDER BY STARTED_AT;
 ```
 
-Run tests (no Exasol required):
+---
 
-```bash
-cargo test
-```
+## Graph execution rules
 
-Measure test coverage:
+- **Root tasks trigger independently** on their cron schedule. Each trigger starts a new graph run with a shared `GRAPH_RUN_ID`.
+- **Children run depth-first**, in alphabetical `TASK_ID` order. A failed or skipped parent causes its children to be skipped (and recorded in history as `SKIPPED`).
+- **Finalizers always run**, even if their parent failed. They run after all regular children complete.
+- **Root failure is fatal** — the process supervisor should restart the binary. Child and finalizer failures are non-fatal: the scheduler logs a warning and continues.
+- **Cycles and orphans are silently excluded** from execution. Tasks whose `AFTER` forms a loop, or points to a nonexistent `TASK_ID`, never execute.
 
-```bash
-# one-time install
-cargo install cargo-llvm-cov
+---
 
-# terminal coverage summary
-cargo coverage
+## Further reading
 
-# HTML report in target/llvm-cov/html/index.html
-cargo coverage-html
-
-# LCOV output for CI tooling
-cargo coverage-lcov
-```
-
-Run scheduler:
-
-```bash
-export EXA_HOST=localhost
-export EXA_PORT=8563
-export EXA_USER=sys
-export EXA_PASSWORD=exasol
-export EXA_SCHEMA=PUBLIC
-export EXA_TASKS_TABLE=SCHED_TASKS
-export POLL_INTERVAL_SECS=10
-export RUST_LOG=info
-cargo run
-```
-
-Or with DSN from env:
-
-```bash
-export EXA_DSN='exasol://sys:exasol@localhost:8563?tls=0&validateservercertificate=0'
-export EXA_SCHEMA=PUBLIC
-export EXA_TASKS_TABLE=SCHED_TASKS
-cargo run
-```
-
-Or without any credential env vars (single URL argument):
-
-```bash
-cargo run -- 'exasol://sys:exasol@localhost:8563/PUBLIC?tls=0&validateservercertificate=0'
-```
-
-### Exasol Contract Test (Optional)
-
-A smoke contract test exists in `tests/exasol_contract.rs`.
-
-It is skipped unless enabled:
-
-```bash
-export EXA_CONTRACT_TESTS=1
-# plus normal EXA_* variables
-cargo test exasol_contract -- --nocapture
-```
-
-This keeps CI and local default tests independent of a running Exasol instance.
-
-### Error Behavior
-
-`DbError` carries context for:
-- connection failures
-- query failures (includes SQL text)
-- Arrow decoding failures
-- not-found metadata rows
-- config/runtime init issues
-
-Execution behavior (Stage-1):
-- task SQL is executed exactly as stored in `STATEMENT`
-- scheduler does not split semicolon-separated SQL client-side
-- if execution fails, the tick returns error and should be handled by process supervision
-
-### Operations Runbook
-
-Add job:
-1. Insert row into `SCHED_TASKS`.
-2. Validate schedule syntax/timezone.
-3. Verify reload + execution logs.
-
-Pause job:
-1. Set `ENABLED=FALSE`.
-2. Verify reload reflects changed row.
-
-Change schedule:
-1. Update `SCHEDULE`.
-2. Verify next due time updates.
-
-Restart service:
-1. Restart process.
-2. Expect no backfill of missed windows.
-3. Verify next scheduled run only.
-
-### Security Notes
-
-Use a dedicated scheduler DB user with least privilege:
-- read metadata and task table
-- execute task SQL
-- future stages will need write access to `SCHED_HISTORY`
-
-Do not share admin credentials with scheduler service credentials.
-
-## Development Notes
-
-- Rust stable
-- production DB library: `exarrow-rs`
-- scheduler core remains testable via trait abstractions
-- all default tests run without Exasol
-
-## Stage Roadmap
-
-- Stage-2: execution history (`SCHED_HISTORY`)
-- Stage-3: DAG traversal + finalizers
-- Stage-4: schedule grammar extensions
-
-## Repository Layout
-
-- `src/main.rs`: runnable service entrypoint
-- `src/config.rs`: env-based runtime configuration
-- `src/db/mod.rs`: `SchedulerDb` trait and `DbError`
-- `src/db/exasol.rs`: Exasol adapter implementation
-- `src/scheduler.rs`: scheduler engine
-- `src/schedule.rs`: schedule parser
-- `src/model.rs`: shared row/event models
-- `src/time.rs`: clock abstraction
-- `tests/`: unit and integration tests (plus optional Exasol contract test)
+- [docs/configuration.md](docs/configuration.md) — full environment variable reference and DSN format
+- [docs/operations.md](docs/operations.md) — building, systemd/Docker deployment, security, contract tests
