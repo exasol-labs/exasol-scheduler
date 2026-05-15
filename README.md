@@ -195,4 +195,5 @@ ORDER BY STARTED_AT;
 ## Further reading
 
 - [docs/configuration.md](docs/configuration.md) — full environment variable reference and DSN format
-- [docs/operations.md](docs/operations.md) — building, systemd/Docker deployment, security, contract tests
+- [docs/security.md](docs/security.md) — trust model, least-privilege setup, credential management, hardening checklist
+- [docs/operations.md](docs/operations.md) — building, systemd/Docker deployment, contract tests

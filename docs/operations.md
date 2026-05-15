@@ -89,10 +89,9 @@ docker run -d \
 
 ## Security
 
-- Use a dedicated Exasol user for the scheduler — not `SYS` or any admin account.
-- The scheduler user needs **SELECT** on `SCHED_TASKS`, **INSERT** on `SCHED_HISTORY`, and whatever permissions the SQL in `SCHED_TASKS."STATEMENT"` requires.
-- Store credentials in environment files with restricted permissions (`chmod 600`), not embedded in SQL statements or baked into container images.
-- Restarting the scheduler after a failure does not replay missed executions. The next scheduled occurrence is computed from the current time.
+See [security.md](security.md) for the full guide covering the trust model, least-privilege user setup, credential management, and a hardening checklist.
+
+One operational note: restarting the scheduler after a failure does not replay missed executions. The next scheduled occurrence is computed from the current time.
 
 ---
 
