@@ -1,0 +1,10 @@
+/target
+.DS_Store
+.env
+*.lcov
+
+# working files
+plans/
+reports/
+.claude/
+AGENTS.md

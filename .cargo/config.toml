@@ -1,0 +1,5 @@
+[alias]
+# Coverage helpers (requires `cargo-llvm-cov` to be installed).
+coverage = "llvm-cov --workspace --all-targets --summary-only"
+coverage-html = "llvm-cov --workspace --all-targets --html"
+coverage-lcov = "llvm-cov --workspace --all-targets --lcov --output-path target/llvm-cov/lcov.info"
