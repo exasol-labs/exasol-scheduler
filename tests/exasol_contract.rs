@@ -397,6 +397,37 @@ fn contract_graph_run_id_matches_across_root_and_child() {
     assert!(child_count >= 2, "both root and child must share the graph_run_id; got {child_count}");
 }
 
+// --- ensure_tables contract tests ---
+
+#[test]
+fn ensure_tables_creates_tables_when_they_do_not_exist() {
+    if skip_unless_enabled() { return; }
+
+    let db = ExasolDb::new(nano_config()).expect("failed to build ExasolDb");
+    db.execute_statement("CREATE SCHEMA IF NOT EXISTS PUBLIC")
+        .unwrap_or_else(|e| eprintln!("create schema warning: {e}"));
+    db.execute_statement("DROP TABLE IF EXISTS PUBLIC.SCHED_HISTORY")
+        .unwrap_or_else(|e| eprintln!("drop history warning: {e}"));
+    db.execute_statement("DROP TABLE IF EXISTS PUBLIC.SCHED_TASKS")
+        .unwrap_or_else(|e| eprintln!("drop tasks warning: {e}"));
+
+    let result = db.ensure_tables().expect("ensure_tables should succeed");
+    assert!(result.tasks_table_created, "tasks table should have been created");
+    assert!(result.history_table_created, "history table should have been created");
+}
+
+#[test]
+fn ensure_tables_is_idempotent_when_tables_already_exist() {
+    if skip_unless_enabled() { return; }
+
+    let db = ExasolDb::new(nano_config()).expect("failed to build ExasolDb");
+    setup_tables(&db);
+
+    let result = db.ensure_tables().expect("ensure_tables should succeed on existing tables");
+    assert!(!result.tasks_table_created, "tasks table already exists, should not be re-created");
+    assert!(!result.history_table_created, "history table already exists, should not be re-created");
+}
+
 #[test]
 fn contract_finalizer_phase_is_recorded_as_final() {
     if skip_unless_enabled() { return; }

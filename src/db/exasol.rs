@@ -20,6 +20,12 @@ pub struct ExasolDbConfig {
     pub history_table: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnsureTablesResult {
+    pub tasks_table_created: bool,
+    pub history_table_created: bool,
+}
+
 /// Production Exasol adapter backed by exarrow-rs.
 ///
 /// The scheduler core keeps using the `SchedulerDb` trait, so tests can continue
@@ -107,6 +113,72 @@ impl ExasolDb {
 
             result
         })
+    }
+
+    /// Creates `SCHED_TASKS` and `SCHED_HISTORY` if they do not already exist.
+    /// Safe to call on every startup — it is a no-op when both tables are present.
+    pub fn ensure_tables(&self) -> Result<EnsureTablesResult, DbError> {
+        let tasks_table_created =
+            if !self.table_exists(&self.config.schema, &self.config.tasks_table)? {
+                tracing::info!(
+                    schema = self.config.schema.as_str(),
+                    table = self.config.tasks_table.as_str(),
+                    "creating table"
+                );
+                let sql = build_create_tasks_table_sql(
+                    &self.config.schema,
+                    &self.config.tasks_table,
+                );
+                self.execute_statement(&sql)?;
+                true
+            } else {
+                tracing::debug!(
+                    table = self.config.tasks_table.as_str(),
+                    "table already exists"
+                );
+                false
+            };
+
+        let history_table_created =
+            if !self.table_exists(&self.config.schema, &self.config.history_table)? {
+                tracing::info!(
+                    schema = self.config.schema.as_str(),
+                    table = self.config.history_table.as_str(),
+                    "creating table"
+                );
+                let sql = build_create_history_table_sql(
+                    &self.config.schema,
+                    &self.config.history_table,
+                );
+                self.execute_statement(&sql)?;
+                true
+            } else {
+                tracing::debug!(
+                    table = self.config.history_table.as_str(),
+                    "table already exists"
+                );
+                false
+            };
+
+        Ok(EnsureTablesResult {
+            tasks_table_created,
+            history_table_created,
+        })
+    }
+
+    fn table_exists(&self, schema: &str, table: &str) -> Result<bool, DbError> {
+        let sql = format!(
+            "SELECT OBJECT_NAME FROM SYS.EXA_ALL_OBJECTS \
+             WHERE ROOT_TYPE = 'SCHEMA' \
+             AND UPPER(ROOT_NAME) = UPPER({}) \
+             AND UPPER(OBJECT_NAME) = UPPER({}) \
+             LIMIT 1",
+            quote_literal(schema),
+            quote_literal(table),
+        );
+        let batches = self.query_batches("ensure_tables", sql)?;
+        let found = batches.iter().any(|b| b.num_rows() > 0);
+        Ok(found)
     }
 }
 
@@ -248,6 +320,40 @@ pub fn build_tasks_last_changed_query(schema: &str, table: &str) -> String {
          ORDER BY LAST_COMMIT DESC LIMIT 1",
         quote_literal(schema),
         quote_literal(table)
+    )
+}
+
+pub fn build_create_tasks_table_sql(schema: &str, table: &str) -> String {
+    format!(
+        "CREATE TABLE {schema}.{table} (\
+            \"TASK_ID\" VARCHAR(128) NOT NULL, \
+            \"ENABLED\" BOOLEAN DEFAULT TRUE, \
+            \"SCHEDULE\" VARCHAR(512) NOT NULL, \
+            \"STATEMENT\" VARCHAR(2000000) NOT NULL, \
+            \"AFTER\" VARCHAR(128), \
+            \"IS_FINAL\" BOOLEAN DEFAULT FALSE, \
+            \"COMMENT\" VARCHAR(2000), \
+            PRIMARY KEY (\"TASK_ID\"))",
+        schema = quote_identifier(schema),
+        table = quote_identifier(table),
+    )
+}
+
+pub fn build_create_history_table_sql(schema: &str, table: &str) -> String {
+    format!(
+        "CREATE TABLE {schema}.{table} (\
+            \"RUN_ID\" VARCHAR(36) NOT NULL, \
+            \"GRAPH_RUN_ID\" VARCHAR(36), \
+            \"TASK_ID\" VARCHAR(128) NOT NULL, \
+            \"GRAPH_PHASE\" VARCHAR(16) NOT NULL, \
+            \"SCHEDULED_FOR\" TIMESTAMP, \
+            \"STARTED_AT\" TIMESTAMP NOT NULL, \
+            \"FINISHED_AT\" TIMESTAMP, \
+            \"STATUS\" VARCHAR(16) NOT NULL, \
+            \"ERROR_MESSAGE\" VARCHAR(2000000), \
+            PRIMARY KEY (\"RUN_ID\"))",
+        schema = quote_identifier(schema),
+        table = quote_identifier(table),
     )
 }
 
@@ -903,5 +1009,44 @@ mod tests {
             execute_err,
             DbError::Connection { operation, .. } if operation == "execute_statement"
         ));
+    }
+
+    #[test]
+    fn create_tasks_table_sql_contains_all_required_columns() {
+        let sql = build_create_tasks_table_sql("PUBLIC", "SCHED_TASKS");
+        assert!(sql.contains("\"PUBLIC\".\"SCHED_TASKS\""));
+        assert!(sql.contains("\"TASK_ID\""));
+        assert!(sql.contains("\"ENABLED\""));
+        assert!(sql.contains("\"SCHEDULE\""));
+        assert!(sql.contains("\"STATEMENT\""));
+        assert!(sql.contains("\"AFTER\""));
+        assert!(sql.contains("\"IS_FINAL\""));
+        assert!(sql.contains("\"COMMENT\""));
+        assert!(sql.contains("PRIMARY KEY"));
+    }
+
+    #[test]
+    fn create_history_table_sql_contains_all_required_columns() {
+        let sql = build_create_history_table_sql("PUBLIC", "SCHED_HISTORY");
+        assert!(sql.contains("\"PUBLIC\".\"SCHED_HISTORY\""));
+        assert!(sql.contains("\"RUN_ID\""));
+        assert!(sql.contains("\"GRAPH_RUN_ID\""));
+        assert!(sql.contains("\"TASK_ID\""));
+        assert!(sql.contains("\"GRAPH_PHASE\""));
+        assert!(sql.contains("\"SCHEDULED_FOR\""));
+        assert!(sql.contains("\"STARTED_AT\""));
+        assert!(sql.contains("\"FINISHED_AT\""));
+        assert!(sql.contains("\"STATUS\""));
+        assert!(sql.contains("\"ERROR_MESSAGE\""));
+        assert!(sql.contains("PRIMARY KEY"));
+    }
+
+    #[test]
+    fn create_table_sql_functions_quote_identifiers() {
+        let tasks_sql = build_create_tasks_table_sql("MY\"SCHEMA", "MY\"TABLE");
+        assert!(tasks_sql.contains("\"MY\"\"SCHEMA\".\"MY\"\"TABLE\""));
+
+        let history_sql = build_create_history_table_sql("MY\"SCHEMA", "HIST\"TABLE");
+        assert!(history_sql.contains("\"MY\"\"SCHEMA\".\"HIST\"\"TABLE\""));
     }
 }

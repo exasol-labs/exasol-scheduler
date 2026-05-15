@@ -18,11 +18,23 @@ fn run(cli_dsn: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!(
         schema = config.exasol.schema.as_str(),
         tasks_table = config.exasol.tasks_table.as_str(),
+        history_table = config.exasol.history_table.as_str(),
         poll_interval_secs = config.poll_interval.as_secs(),
-        "starting exasol lightweight scheduler (stage-1b)"
+        "starting exasol scheduler"
     );
 
-    let db = Arc::new(ExasolDb::new(config.exasol)?);
+    let db = ExasolDb::new(config.exasol)?;
+
+    let init = db.ensure_tables()?;
+    if init.tasks_table_created || init.history_table_created {
+        tracing::info!(
+            tasks_table_created = init.tasks_table_created,
+            history_table_created = init.history_table_created,
+            "created missing database tables"
+        );
+    }
+
+    let db = Arc::new(db);
     let clock = Arc::new(SystemClock);
     let mut scheduler = Scheduler::with_poll_interval(db, clock.clone(), config.poll_interval);
 
@@ -270,7 +282,7 @@ mod tests {
     fn run_returns_error_when_exasol_connection_cannot_be_opened() {
         init_tracing();
         let err = run(Some("exasol://sys:pw@localhost:8563?tls=0".to_string())).unwrap_err();
-        assert!(err.to_string().contains("connection failed during get_last_changed"));
+        assert!(err.to_string().contains("connection failed during ensure_tables"));
     }
 
     #[test]

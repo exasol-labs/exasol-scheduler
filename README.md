@@ -2,7 +2,7 @@
 
 # Exasol Scheduler
 
-**Table-driven SQL job scheduling for Exasol**
+**Lightweight table-driven SQL job scheduling for Exasol**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org)
@@ -39,46 +39,7 @@ With Exasol Scheduler, task definitions live in a standard Exasol table:
 
 ## Quick Start
 
-### 1. Create the tables
-
-```sql
-CREATE TABLE PUBLIC.SCHED_TASKS (
-    "TASK_ID"   VARCHAR(128)     NOT NULL,
-    "ENABLED"   BOOLEAN          DEFAULT TRUE,
-    "SCHEDULE"  VARCHAR(512)     NOT NULL,
-    "STATEMENT" VARCHAR(2000000) NOT NULL,
-    "AFTER"     VARCHAR(128),
-    "IS_FINAL"  BOOLEAN          DEFAULT FALSE,
-    "COMMENT"   VARCHAR(2000),
-    PRIMARY KEY ("TASK_ID")
-);
-
-CREATE TABLE PUBLIC.SCHED_HISTORY (
-    "RUN_ID"        VARCHAR(36)      NOT NULL,
-    "GRAPH_RUN_ID"  VARCHAR(36),
-    "TASK_ID"       VARCHAR(128)     NOT NULL,
-    "GRAPH_PHASE"   VARCHAR(16)      NOT NULL,
-    "SCHEDULED_FOR" TIMESTAMP,
-    "STARTED_AT"    TIMESTAMP        NOT NULL,
-    "FINISHED_AT"   TIMESTAMP,
-    "STATUS"        VARCHAR(16)      NOT NULL,
-    "ERROR_MESSAGE" VARCHAR(2000000),
-    PRIMARY KEY ("RUN_ID")
-);
-```
-
-### 2. Add your first task
-
-```sql
-INSERT INTO PUBLIC.SCHED_TASKS ("TASK_ID", "SCHEDULE", "STATEMENT")
-VALUES (
-    'hourly_cleanup',
-    'CRON 0 0 * * * * TZ=UTC',
-    'DELETE FROM MY_SCHEMA.STAGING WHERE created_at < ADD_DAYS(CURRENT_TIMESTAMP, -7)'
-);
-```
-
-### 3. Start the scheduler
+### 1. Start the scheduler
 
 ```bash
 # Positional DSN argument:
@@ -94,6 +55,18 @@ exasol_scheduler
 
 See [docs/configuration.md](docs/configuration.md) for the full list of environment variables.
 
+### 2. Add your first task
+
+The scheduler creates `SCHED_TASKS` and `SCHED_HISTORY` automatically on first startup — no DDL required. Once the binary is running, add tasks with plain SQL:
+
+```sql
+INSERT INTO PUBLIC.SCHED_TASKS ("TASK_ID", "SCHEDULE", "STATEMENT")
+VALUES (
+    'hourly_cleanup',
+    'CRON 0 0 * * * * TZ=UTC',
+    'DELETE FROM MY_SCHEMA.STAGING WHERE created_at < ADD_DAYS(CURRENT_TIMESTAMP, -7)'
+);
+```
 ---
 
 ## Defining tasks
