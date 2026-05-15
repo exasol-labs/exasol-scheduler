@@ -28,6 +28,21 @@ With Exasol Scheduler, task definitions live in a standard Exasol table:
 
 ---
 
+## Building from source
+
+Requires [Rust](https://rustup.rs) 1.85 or later.
+
+```bash
+git clone https://github.com/exasol-labs/exasol-scheduler.git
+cd exasol-scheduler
+cargo build --release
+# Binary: target/release/exasol_scheduler
+```
+
+See [docs/operations.md](docs/operations.md) for coverage reports, CI setup, and Docker packaging.
+
+---
+
 ## Quick Start
 
 ### 1. Start the scheduler
