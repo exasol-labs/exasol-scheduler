@@ -39,7 +39,17 @@ impl ParsedSchedule {
         }
 
         let cron_expr = cron_tokens.join(" ");
-        let cron = Schedule::from_str(&cron_expr)
+
+        // Remap the DOW field (index 5) from standard cron numbering
+        // (0/7=Sun, 1=Mon…6=Sat) to cron-rs internal numbering (1=Sun, 2=Mon…7=Sat)
+        // so that users can write schedules the same way as standard Unix cron.
+        let remapped_cron_expr = {
+            let mut parts: Vec<String> = cron_tokens.iter().map(|s| s.to_string()).collect();
+            parts[5] = remap_dow_field(&parts[5]);
+            parts.join(" ")
+        };
+
+        let cron = Schedule::from_str(&remapped_cron_expr)
             .map_err(|err| ScheduleParseError::InvalidCron(err.to_string()))?;
 
         let normalized = match timezone {
@@ -139,4 +149,45 @@ fn parse_timezone(value: &str) -> Result<ParsedTimeZone, ScheduleParseError> {
         .parse::<Tz>()
         .map(ParsedTimeZone::Iana)
         .map_err(|_| ScheduleParseError::InvalidTimeZone(value.to_string()))
+}
+
+// Remap a full DOW field (may be comma-separated) from standard cron numbering
+// (0/7=Sun, 1=Mon…6=Sat) to cron-rs internal numbering (1=Sun, 2=Mon…7=Sat).
+// Named tokens (MON, FRI, …) are passed through unchanged.
+fn remap_dow_field(field: &str) -> String {
+    if field == "*" || field == "?" {
+        return field.to_string();
+    }
+    field
+        .split(',')
+        .map(remap_dow_token)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn remap_dow_token(token: &str) -> String {
+    let (range_part, step_part) = token
+        .split_once('/')
+        .map_or((token, None), |(r, s)| (r, Some(s)));
+
+    let remapped = if range_part == "*" || range_part == "?" {
+        range_part.to_string()
+    } else if let Some((start, end)) = range_part.split_once('-') {
+        format!("{}-{}", remap_dow_atom(start), remap_dow_atom(end))
+    } else {
+        remap_dow_atom(range_part)
+    };
+
+    match step_part {
+        Some(step) => format!("{remapped}/{step}"),
+        None => remapped,
+    }
+}
+
+// If the atom is a number, apply (n % 7) + 1. Named days pass through unchanged.
+fn remap_dow_atom(atom: &str) -> String {
+    match atom.parse::<u32>() {
+        Ok(n) => ((n % 7) + 1).to_string(),
+        Err(_) => atom.to_string(),
+    }
 }

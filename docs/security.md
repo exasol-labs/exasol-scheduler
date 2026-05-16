@@ -17,8 +17,8 @@ Never run the scheduler as `SYS` or any DBA account. Create a purpose-built user
 On first startup the scheduler creates `SCHED_TASKS` and `SCHED_HISTORY` if they do not exist. `CREATE TABLE` on the schema is needed for that one operation.
 
 ```sql
--- Create the dedicated user
-CREATE USER scheduler_svc IDENTIFIED BY '<strong-password>';
+-- Create the dedicated user (Exasol requires double-quoted password literals)
+CREATE USER scheduler_svc IDENTIFIED BY "YourStrongPasswordHere";
 GRANT CREATE SESSION TO scheduler_svc;
 
 -- Change-detection: the scheduler reads SYS.EXA_ALL_OBJECTS
@@ -31,13 +31,13 @@ GRANT SELECT ON TABLE PUBLIC.SCHED_TASKS TO scheduler_svc;
 GRANT INSERT ON TABLE PUBLIC.SCHED_HISTORY TO scheduler_svc;
 
 -- First-startup table creation (can be revoked after both tables exist)
-GRANT CREATE TABLE ON SCHEMA PUBLIC TO scheduler_svc;
+GRANT CREATE TABLE TO scheduler_svc;
 ```
 
 Once the tables are confirmed to exist, revoke `CREATE TABLE`:
 
 ```sql
-REVOKE CREATE TABLE ON SCHEMA PUBLIC FROM scheduler_svc;
+REVOKE CREATE TABLE FROM scheduler_svc;
 ```
 
 Alternatively, create the tables yourself before starting the scheduler for the first time (reference DDL is in [configuration.md](configuration.md#table-ddl-reference)), and never grant `CREATE TABLE` at all.
@@ -121,16 +121,23 @@ Exasol's built-in audit log (`EXA_DBA_AUDIT_SQL`) records every SQL statement ex
 
 The `SCHED_HISTORY` table itself is an append-only audit trail of scheduler-level outcomes (`SUCCEEDED`, `FAILED`, `SKIPPED`). It records which task ran and when, but not the full SQL text. For the full SQL, join `SCHED_HISTORY` against `SCHED_TASKS` on `TASK_ID`, or consult Exasol's audit log.
 
-To detect unexpected changes to the task schedule, periodically query:
+To detect unexpected changes to the task schedule, run these two queries:
 
 ```sql
-SELECT TASK_ID, STATEMENT, LAST_COMMIT
-FROM   SYS.EXA_ALL_OBJECTS o
-JOIN   PUBLIC.SCHED_TASKS   t ON t.TASK_ID = t.TASK_ID   -- or use change detection logic
-ORDER  BY LAST_COMMIT DESC;
+-- When was the task table last modified?
+SELECT LAST_COMMIT
+FROM   SYS.EXA_ALL_OBJECTS
+WHERE  ROOT_TYPE = 'SCHEMA'
+AND    UPPER(ROOT_NAME)   = UPPER('PUBLIC')
+AND    UPPER(OBJECT_NAME) = UPPER('SCHED_TASKS');
+
+-- What tasks are currently scheduled?
+SELECT "TASK_ID", "ENABLED", "SCHEDULE", "STATEMENT"
+FROM   PUBLIC.SCHED_TASKS
+ORDER  BY "TASK_ID";
 ```
 
-Or simply alert when the scheduler logs a `"task snapshot reloaded"` message with `added > 0` or `changed > 0` outside of planned deployment windows.
+Alert when the `LAST_COMMIT` timestamp advances outside of planned deployment windows. Or simply watch for the scheduler logging a `"task snapshot reloaded"` message with `added > 0` or `changed > 0`.
 
 ---
 

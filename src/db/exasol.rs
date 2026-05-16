@@ -204,9 +204,10 @@ impl SchedulerDb for ExasolDb {
         Self::run_async(operation, async {
             let mut connection = self.connect(operation).await?;
 
-            // Execute the statement exactly as stored (no client-side splitting/rewrite).
+            // Use query() so that SELECT, DML, and DDL all work. The result set or
+            // row count is discarded — we only care whether the statement succeeded.
             let result = connection
-                .execute_update(sql_text.clone())
+                .query(sql_text.clone())
                 .await
                 .map(|_| ())
                 .map_err(|source| DbError::Query {

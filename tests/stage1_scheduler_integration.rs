@@ -455,3 +455,35 @@ async fn run_forever_returns_error_after_first_successful_tick() {
     let err = scheduler.run_forever().await.unwrap_err();
     assert!(err.to_string().contains("forced run_forever stop"));
 }
+
+// --- task with invalid schedule never fires (BUG-004) ---
+
+#[test]
+fn task_with_invalid_schedule_never_executes() {
+    let now = dt(2026, 2, 1, 12, 0, 59);
+    let clock = Arc::new(FakeClock::new(now));
+    let db = Arc::new(ProgrammableDb::new(
+        vec![version(
+            dt(2026, 2, 1, 12, 0, 0),
+            vec![TaskRow {
+                task_id: "bad_schedule".to_string(),
+                enabled: true,
+                schedule: "EVERY TUESDAY AT NOON".to_string(),
+                statement: "SELECT bad".to_string(),
+                after: None,
+                is_final: false,
+                comment: None,
+            }],
+        )],
+        clock.clone(),
+    ));
+    let mut scheduler = Scheduler::with_poll_interval(db.clone(), clock.clone(), Duration::from_secs(300));
+
+    // Load snapshot
+    let _ = scheduler.tick().unwrap();
+    clock.advance(Duration::from_secs(1));
+    // Tick at minute boundary — task must not execute
+    let result = scheduler.tick().unwrap();
+    assert_eq!(result.executed_roots, 0, "task with invalid schedule must never fire");
+    assert_eq!(db.execute_calls(), 0, "no SQL must have been executed");
+}

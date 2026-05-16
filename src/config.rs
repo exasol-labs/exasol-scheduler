@@ -31,6 +31,12 @@ impl AppConfig {
         let tasks_table = env_or_default("EXA_TASKS_TABLE", "SCHED_TASKS");
         let history_table = env_or_default("EXA_HISTORY_TABLE", "SCHED_HISTORY");
         let poll_interval_secs = parse_u64_env("POLL_INTERVAL_SECS", 10)?;
+        if poll_interval_secs == 0 {
+            return Err(ConfigError::InvalidEnv {
+                name: "POLL_INTERVAL_SECS".to_string(),
+                message: "must be at least 1 second".to_string(),
+            });
+        }
         let query_timeout = env::var("EXA_QUERY_TIMEOUT_SECS")
             .ok()
             .filter(|value| !value.trim().is_empty())
@@ -391,6 +397,22 @@ mod tests {
             assert!(matches!(
                 err,
                 ConfigError::InvalidEnv { name, .. } if name == "POLL_INTERVAL_SECS"
+            ));
+        });
+    }
+
+    #[test]
+    fn rejects_zero_poll_interval() {
+        with_clean_env(|| {
+            set_env("EXA_HOST", "localhost");
+            set_env("EXA_USER", "sys");
+            set_env("EXA_PASSWORD", "exasol");
+            set_env("POLL_INTERVAL_SECS", "0");
+            let err = AppConfig::from_env().unwrap_err();
+            assert!(matches!(
+                err,
+                ConfigError::InvalidEnv { name, ref message }
+                    if name == "POLL_INTERVAL_SECS" && message.contains("at least 1")
             ));
         });
     }

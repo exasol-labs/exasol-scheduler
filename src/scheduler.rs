@@ -379,6 +379,9 @@ impl<'a> GraphRunner<'a> {
         let (status, started_at, finished_at, error_message) = if parent_status != "SUCCEEDED" {
             let t = self.clock.now();
             ("SKIPPED".to_string(), t, None, None)
+        } else if !task.enabled {
+            let t = self.clock.now();
+            ("SKIPPED".to_string(), t, None, Some("task is disabled".to_string()))
         } else {
             let started_at = self.clock.now();
             let exec_result = self.db.execute_statement(&task.statement);
@@ -434,15 +437,19 @@ impl<'a> GraphRunner<'a> {
             return;
         };
 
-        let started_at = self.clock.now();
-        let exec_result = self.db.execute_statement(&task.statement);
-        let finished_at = self.clock.now();
-
-        let (status, error_message) = match exec_result {
-            Ok(_) => ("SUCCEEDED".to_string(), None),
-            Err(e) => {
-                self.failed_children += 1;
-                ("FAILED".to_string(), Some(e.to_string()))
+        let (status, started_at, finished_at, error_message) = if !task.enabled {
+            let t = self.clock.now();
+            ("SKIPPED".to_string(), t, None, Some("task is disabled".to_string()))
+        } else {
+            let started_at = self.clock.now();
+            let exec_result = self.db.execute_statement(&task.statement);
+            let finished_at = self.clock.now();
+            match exec_result {
+                Ok(_) => ("SUCCEEDED".to_string(), started_at, Some(finished_at), None),
+                Err(e) => {
+                    self.failed_children += 1;
+                    ("FAILED".to_string(), started_at, Some(finished_at), Some(e.to_string()))
+                }
             }
         };
 
@@ -453,7 +460,7 @@ impl<'a> GraphRunner<'a> {
             graph_phase: "FINAL".to_string(),
             scheduled_for: None,
             started_at,
-            finished_at: Some(finished_at),
+            finished_at,
             status: status.clone(),
             error_message,
         };
@@ -677,7 +684,18 @@ impl TaskDef {
         });
         let is_root = after.is_none() && !row.is_final;
         let parsed_schedule = if row.enabled && is_root {
-            ParsedSchedule::parse(&row.schedule).ok()
+            match ParsedSchedule::parse(&row.schedule) {
+                Ok(ps) => Some(ps),
+                Err(e) => {
+                    tracing::warn!(
+                        task_id = row.task_id.as_str(),
+                        schedule = row.schedule.as_str(),
+                        error = %e,
+                        "task has unparseable schedule and will never fire"
+                    );
+                    None
+                }
+            }
         } else {
             None
         };

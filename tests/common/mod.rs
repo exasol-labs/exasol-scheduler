@@ -208,6 +208,18 @@ pub fn child_task(task_id: &str, parent: &str, schedule: &str, statement: &str) 
     }
 }
 
+pub fn disabled_child_task(task_id: &str, parent: &str, schedule: &str, statement: &str) -> TaskRow {
+    TaskRow {
+        task_id: task_id.to_string(),
+        enabled: false,
+        schedule: schedule.to_string(),
+        statement: statement.to_string(),
+        after: Some(parent.to_string()),
+        is_final: false,
+        comment: None,
+    }
+}
+
 pub fn finalizer_task(task_id: &str, parent: &str, schedule: &str, statement: &str) -> TaskRow {
     TaskRow {
         task_id: task_id.to_string(),

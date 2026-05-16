@@ -1,7 +1,8 @@
 mod common;
 
 use chrono::{DateTime, TimeZone, Utc};
-use common::{DbVersion, ProgrammableDb, child_task, finalizer_task, root_task};
+use common::{DbVersion, ProgrammableDb, child_task, disabled_child_task, finalizer_task, root_task};
+use exasol_scheduler::model::TaskRow;
 use exasol_scheduler::schedule::LocalTimeZone;
 use exasol_scheduler::scheduler::Scheduler;
 use exasol_scheduler::time::FakeClock;
@@ -479,4 +480,79 @@ fn finalizer_runs_after_all_children_on_root_failure() {
     let fin_event = db.history_events().into_iter().find(|e| e.task_id == "fin");
     assert!(fin_event.is_some(), "finalizer must have run");
     assert_eq!(fin_event.unwrap().graph_phase, "FINAL");
+}
+
+// --- disabled child is SKIPPED, not executed (BUG-003) ---
+
+#[test]
+fn disabled_child_is_skipped_not_executed_when_parent_succeeds() {
+    let now = dt(2026, 2, 1, 12, 0, 59);
+    let clock = Arc::new(FakeClock::new(now));
+    let db = Arc::new(ProgrammableDb::new(
+        vec![version(
+            dt(2026, 2, 1, 12, 0, 0),
+            vec![
+                root_task("root", "CRON 0 * * * * * TZ=UTC", "SELECT root"),
+                disabled_child_task("disabled_child", "root", "CRON 0 * * * * * TZ=UTC", "SELECT disabled"),
+                child_task("enabled_child", "root", "CRON 0 * * * * * TZ=UTC", "SELECT enabled"),
+            ],
+        )],
+        clock.clone(),
+    ));
+    let mut scheduler = make_scheduler(db.clone(), clock.clone());
+    tick_past_minute(&clock, &mut scheduler);
+    let result = scheduler.tick().unwrap();
+
+    assert_eq!(result.executed_roots, 1);
+
+    // disabled_child must not have been executed
+    let execs: Vec<_> = db.executions().into_iter().map(|r| r.statement).collect();
+    assert!(!execs.contains(&"SELECT disabled".to_string()), "disabled child must not execute");
+    assert!(execs.contains(&"SELECT enabled".to_string()), "enabled child must execute");
+
+    // disabled_child must have a SKIPPED history entry
+    let events = db.history_events();
+    let skipped = events.iter().find(|e| e.task_id == "disabled_child");
+    assert!(skipped.is_some(), "disabled child must have a history entry");
+    assert_eq!(skipped.unwrap().status, "SKIPPED");
+}
+
+#[test]
+fn disabled_finalizer_is_skipped_not_executed() {
+    let now = dt(2026, 2, 1, 12, 0, 59);
+    let clock = Arc::new(FakeClock::new(now));
+
+    let disabled_fin = TaskRow {
+        task_id: "disabled_fin".to_string(),
+        enabled: false,
+        schedule: "CRON 0 * * * * * TZ=UTC".to_string(),
+        statement: "SELECT disabled_fin".to_string(),
+        after: Some("root".to_string()),
+        is_final: true,
+        comment: None,
+    };
+
+    let db = Arc::new(ProgrammableDb::new(
+        vec![version(
+            dt(2026, 2, 1, 12, 0, 0),
+            vec![
+                root_task("root", "CRON 0 * * * * * TZ=UTC", "SELECT root"),
+                finalizer_task("enabled_fin", "root", "CRON 0 * * * * * TZ=UTC", "SELECT enabled_fin"),
+                disabled_fin,
+            ],
+        )],
+        clock.clone(),
+    ));
+    let mut scheduler = make_scheduler(db.clone(), clock.clone());
+    tick_past_minute(&clock, &mut scheduler);
+    scheduler.tick().unwrap();
+
+    let execs: Vec<_> = db.executions().into_iter().map(|r| r.statement).collect();
+    assert!(!execs.contains(&"SELECT disabled_fin".to_string()), "disabled finalizer must not execute");
+    assert!(execs.contains(&"SELECT enabled_fin".to_string()), "enabled finalizer must execute");
+
+    let events = db.history_events();
+    let skipped = events.iter().find(|e| e.task_id == "disabled_fin");
+    assert!(skipped.is_some(), "disabled finalizer must have a history entry");
+    assert_eq!(skipped.unwrap().status, "SKIPPED");
 }

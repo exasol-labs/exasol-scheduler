@@ -9,7 +9,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     run(std::env::args().nth(1))
 }
 
+fn is_help_flag(arg: &str) -> bool {
+    arg == "--help" || arg == "-h"
+}
+
 fn run(cli_dsn: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
+    if cli_dsn.as_deref().is_some_and(is_help_flag) {
+        println!(
+            "Usage: exasol_scheduler [DSN]\n\n\
+             DSN  exasol://user:password@host:port?tls=1&validateservercertificate=0\n\n\
+             All options can also be set via environment variables.\n\
+             See docs/configuration.md for the full reference.\n\n\
+             Environment variables:\n\
+             EXA_HOST, EXA_PORT, EXA_USER, EXA_PASSWORD\n\
+             EXA_TLS, EXA_VALIDATE_SERVER_CERT\n\
+             EXA_SCHEMA, EXA_TASKS_TABLE, EXA_HISTORY_TABLE\n\
+             POLL_INTERVAL_SECS, RUST_LOG"
+        );
+        std::process::exit(0);
+    }
     init_tracing();
 
     // Optional positional CLI argument: exarrow-rs DSN (exasol://...).
@@ -283,6 +301,15 @@ mod tests {
         init_tracing();
         let err = run(Some("exasol://sys:pw@localhost:8563?tls=0".to_string())).unwrap_err();
         assert!(err.to_string().contains("connection failed during ensure_tables"));
+    }
+
+    #[test]
+    fn is_help_flag_recognises_help_and_h() {
+        assert!(is_help_flag("--help"));
+        assert!(is_help_flag("-h"));
+        assert!(!is_help_flag("--version"));
+        assert!(!is_help_flag("exasol://u:p@h:8563"));
+        assert!(!is_help_flag(""));
     }
 
     #[test]

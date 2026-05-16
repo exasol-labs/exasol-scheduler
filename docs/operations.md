@@ -87,11 +87,23 @@ docker run -d \
 
 ---
 
+## Singleton operation
+
+Run exactly **one instance** of the scheduler per set of task tables. There is no distributed lock or leader election. If two instances run simultaneously against the same `SCHED_TASKS` table, both will poll for due tasks and execute them independently — resulting in duplicate `SCHED_HISTORY` rows and double execution of every task.
+
+Use OS-level mechanisms to prevent concurrent instances:
+- **systemd**: `Type=simple` with a single unit file ensures only one process runs.
+- **Docker**: run the container as a single-replica service; do not use replicated or swarm mode.
+- **Kubernetes**: `replicas: 1` in the Deployment spec. Use a `RollingUpdate` strategy (the default) so there is at most one extra instance during a redeploy.
+- **Manual/cron**: use a pid-file guard or `flock` to prevent duplicate invocations.
+
+Restarting the scheduler after a failure does not replay missed executions. The next scheduled occurrence is computed from the current time.
+
+---
+
 ## Security
 
 See [security.md](security.md) for the full guide covering the trust model, least-privilege user setup, credential management, and a hardening checklist.
-
-One operational note: restarting the scheduler after a failure does not replay missed executions. The next scheduled occurrence is computed from the current time.
 
 ---
 

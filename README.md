@@ -63,7 +63,9 @@ See [docs/configuration.md](docs/configuration.md) for the full list of environm
 
 ### 2. Add your first task
 
-The scheduler creates `SCHED_TASKS` and `SCHED_HISTORY` automatically on first startup — no DDL required. Once the binary is running, add tasks with plain SQL:
+The scheduler creates `SCHED_TASKS` and `SCHED_HISTORY` automatically on first startup — no DDL required. Once the binary is running, add tasks with plain SQL.
+
+**Running SQL against Exasol:** You'll need an Exasol-compatible client. Options: [ExaPlus](https://docs.exasol.com/) (Exasol's native client), [DBeaver](https://dbeaver.io/) (community edition with the Exasol JDBC driver), or [pyexasol](https://github.com/exasol/pyexasol) (Python). Exasol uses a WebSocket-based protocol — standard tools like `psql` or `curl` are not compatible.
 
 ```sql
 INSERT INTO PUBLIC.SCHED_TASKS ("TASK_ID", "SCHEDULE", "STATEMENT")
@@ -145,7 +147,8 @@ Fields use standard cron syntax. The `TZ=` suffix accepts any [IANA timezone nam
 | `CRON 0 0 6 * * * TZ=Europe/Berlin` | Daily at 06:00 Berlin time |
 | `CRON 0 0 9 * * 1-5 TZ=America/New_York` | Weekdays at 09:00 New York time |
 | `CRON 0 */15 * * * *` | Every 15 minutes (server local time) |
-| `CRON 0 30 23 L * * TZ=UTC` | Last day of each month at 23:30 UTC |
+
+Day-of-week uses **standard cron numbering: 0=Sunday, 1=Monday, …, 6=Saturday** (7 is also accepted as a Sunday alias). Named days (`SUN`, `MON`, `TUE`, `WED`, `THU`, `FRI`, `SAT`) and ranges like `MON-FRI` are also accepted.
 
 ---
 
@@ -176,14 +179,14 @@ Every execution writes a row to `SCHED_HISTORY`. `STATUS` is `SUCCEEDED`, `FAILE
 
 ```sql
 -- All steps in the most recent run of a pipeline
-SELECT TASK_ID, GRAPH_PHASE, STATUS, ERROR_MESSAGE, STARTED_AT
+SELECT "TASK_ID", "GRAPH_PHASE", "STATUS", "ERROR_MESSAGE", "STARTED_AT"
 FROM PUBLIC.SCHED_HISTORY
-WHERE GRAPH_RUN_ID = (
-    SELECT GRAPH_RUN_ID FROM PUBLIC.SCHED_HISTORY
-    WHERE TASK_ID = 'extract'
-    ORDER BY STARTED_AT DESC LIMIT 1
+WHERE "GRAPH_RUN_ID" = (
+    SELECT "GRAPH_RUN_ID" FROM PUBLIC.SCHED_HISTORY
+    WHERE "TASK_ID" = 'extract'
+    ORDER BY "STARTED_AT" DESC LIMIT 1
 )
-ORDER BY STARTED_AT;
+ORDER BY "STARTED_AT";
 ```
 
 ---
@@ -191,10 +194,13 @@ ORDER BY STARTED_AT;
 ## Graph execution rules
 
 - **Root tasks trigger independently** on their cron schedule. Each trigger starts a new graph run with a shared `GRAPH_RUN_ID`.
-- **Children run depth-first**, in alphabetical `TASK_ID` order. A failed or skipped parent causes its children to be skipped (and recorded in history as `SKIPPED`).
+- **Children execute sequentially**, in alphabetical `TASK_ID` order. There is no parallel fan-out — if you need two independent operations to run concurrently, model them as separate root tasks (each will have its own `GRAPH_RUN_ID`).
+- **A failed or skipped parent** causes all its children to be skipped (recorded in history as `SKIPPED`).
 - **Finalizers always run**, even if their parent failed. They run after all regular children complete.
 - **Root failure is fatal** — the process supervisor should restart the binary. Child and finalizer failures are non-fatal: the scheduler logs a warning and continues.
 - **Cycles and orphans are silently excluded** from execution. Tasks whose `AFTER` forms a loop, or points to a nonexistent `TASK_ID`, never execute.
+
+> **Validating schedules:** There is no built-in dry-run command. To verify a schedule fires at the expected time, insert a test task with `ENABLED = TRUE`, observe the scheduler logs and `SCHED_HISTORY`, then delete it.
 
 ---
 

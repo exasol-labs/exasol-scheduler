@@ -38,9 +38,15 @@ Boolean environment variables (`EXA_TLS`, `EXA_VALIDATE_SERVER_CERT`) accept: `1
 
 | Variable | Default | Description |
 |---|---|---|
-| `EXA_SCHEMA` | `PUBLIC` | Schema that contains the task and history tables. |
+| `EXA_SCHEMA` | `PUBLIC` | Schema that contains the task and history tables. The schema must already exist — the scheduler will not create it. |
 | `EXA_TASKS_TABLE` | `SCHED_TASKS` | Name of the task definitions table. |
 | `EXA_HISTORY_TABLE` | `SCHED_HISTORY` | Name of the execution history table. |
+
+> **Note:** If you use a non-default `EXA_SCHEMA`, create the schema before starting the scheduler:
+> ```sql
+> CREATE SCHEMA my_schema;
+> ```
+> The scheduler creates the task and history tables within the schema automatically, but will fail with an error if the schema itself does not exist.
 
 ---
 
@@ -74,3 +80,37 @@ export POLL_INTERVAL_SECS=10
 export RUST_LOG=info
 exasol_scheduler
 ```
+
+---
+
+## Table DDL Reference
+
+The scheduler creates these tables automatically on first startup (if they do not already exist). To create them manually — or to inspect their schema — use this DDL. Replace `"PUBLIC"` with your `EXA_SCHEMA` value if different.
+
+```sql
+CREATE TABLE "PUBLIC"."SCHED_TASKS" (
+    "TASK_ID"   VARCHAR(128) NOT NULL,
+    "ENABLED"   BOOLEAN DEFAULT TRUE,
+    "SCHEDULE"  VARCHAR(512) NOT NULL,
+    "STATEMENT" VARCHAR(2000000) NOT NULL,
+    "AFTER"     VARCHAR(128),
+    "IS_FINAL"  BOOLEAN DEFAULT FALSE,
+    "COMMENT"   VARCHAR(2000),
+    PRIMARY KEY ("TASK_ID")
+);
+
+CREATE TABLE "PUBLIC"."SCHED_HISTORY" (
+    "RUN_ID"        VARCHAR(36) NOT NULL,
+    "GRAPH_RUN_ID"  VARCHAR(36),
+    "TASK_ID"       VARCHAR(128) NOT NULL,
+    "GRAPH_PHASE"   VARCHAR(16) NOT NULL,
+    "SCHEDULED_FOR" TIMESTAMP,
+    "STARTED_AT"    TIMESTAMP NOT NULL,
+    "FINISHED_AT"   TIMESTAMP,
+    "STATUS"        VARCHAR(16) NOT NULL,
+    "ERROR_MESSAGE" VARCHAR(2000000),
+    PRIMARY KEY ("RUN_ID")
+);
+```
+
+If you create the tables manually before first startup, you can skip granting `CREATE TABLE` to the scheduler user entirely. See [security.md](security.md#minimum-privileges-at-first-startup).
