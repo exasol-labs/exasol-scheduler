@@ -210,3 +210,4 @@ ORDER BY "STARTED_AT";
 - [docs/configuration.md](docs/configuration.md) — full environment variable reference and DSN format
 - [docs/security.md](docs/security.md) — trust model, least-privilege setup, credential management, hardening checklist
 - [docs/operations.md](docs/operations.md) — building, systemd/Docker deployment, contract tests
+- [docs/agent-skill.md](docs/agent-skill.md) — normative reference for autonomous agents managing scheduled pipelines
