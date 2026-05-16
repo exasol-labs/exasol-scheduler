@@ -89,13 +89,14 @@ The scheduler creates these tables automatically on first startup (if they do no
 
 ```sql
 CREATE TABLE "PUBLIC"."SCHED_TASKS" (
-    "TASK_ID"   VARCHAR(128) NOT NULL,
-    "ENABLED"   BOOLEAN DEFAULT TRUE,
-    "SCHEDULE"  VARCHAR(512) NOT NULL,
-    "STATEMENT" VARCHAR(2000000) NOT NULL,
-    "AFTER"     VARCHAR(128),
-    "IS_FINAL"  BOOLEAN DEFAULT FALSE,
-    "COMMENT"   VARCHAR(2000),
+    "TASK_ID"           VARCHAR(128) NOT NULL,
+    "ENABLED"           BOOLEAN DEFAULT TRUE,
+    "SCHEDULE"          VARCHAR(512) NOT NULL,
+    "STATEMENT"         VARCHAR(2000000) NOT NULL,
+    "AFTER"             VARCHAR(128),
+    "IS_FINAL"          BOOLEAN DEFAULT FALSE,
+    "PARALLEL_CHILDREN" BOOLEAN DEFAULT TRUE,
+    "COMMENT"           VARCHAR(2000),
     PRIMARY KEY ("TASK_ID")
 );
 
@@ -114,3 +115,8 @@ CREATE TABLE "PUBLIC"."SCHED_HISTORY" (
 ```
 
 If you create the tables manually before first startup, you can skip granting `CREATE TABLE` to the scheduler user entirely. See [security.md](security.md#minimum-privileges-at-first-startup).
+
+> **Upgrading from an earlier version:** If `SCHED_TASKS` already exists without the `PARALLEL_CHILDREN` column, the scheduler adds it automatically on startup via `ALTER TABLE ... ADD COLUMN "PARALLEL_CHILDREN" BOOLEAN DEFAULT TRUE`. This sets all existing tasks to parallel execution (the new default). If any pipeline requires sequential child execution, update those root tasks before or after upgrading:
+> ```sql
+> UPDATE PUBLIC.SCHED_TASKS SET "PARALLEL_CHILDREN" = FALSE WHERE "TASK_ID" = 'your_root_task';
+> ```

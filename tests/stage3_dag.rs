@@ -530,6 +530,7 @@ fn disabled_finalizer_is_skipped_not_executed() {
         after: Some("root".to_string()),
         is_final: true,
         comment: None,
+        parallel_children: true,
     };
 
     let db = Arc::new(ProgrammableDb::new(
@@ -555,4 +556,132 @@ fn disabled_finalizer_is_skipped_not_executed() {
     let skipped = events.iter().find(|e| e.task_id == "disabled_fin");
     assert!(skipped.is_some(), "disabled finalizer must have a history entry");
     assert_eq!(skipped.unwrap().status, "SKIPPED");
+}
+
+// --- Gap: finalizer sub-children path (execute_finalizer → execute_children_of) ---
+
+#[test]
+fn finalizer_executes_its_own_sub_children() {
+    // root → finalizer → sub_child
+    // sub_child is a non-finalizer child of the finalizer.
+    // This test closes the untested path: execute_finalizer → execute_children_of.
+    let now = dt(2026, 2, 1, 12, 0, 59);
+    let clock = Arc::new(FakeClock::new(now));
+    let db = Arc::new(ProgrammableDb::new(
+        vec![version(
+            dt(2026, 2, 1, 12, 0, 0),
+            vec![
+                root_task("root", "CRON 0 * * * * * TZ=UTC", "SELECT root"),
+                finalizer_task("fin", "root", "CRON 0 * * * * * TZ=UTC", "SELECT fin"),
+                child_task("sub_child", "fin", "CRON 0 * * * * * TZ=UTC", "SELECT sub_child"),
+            ],
+        )],
+        clock.clone(),
+    ));
+    let mut scheduler = make_scheduler(db.clone(), clock.clone());
+    tick_past_minute(&clock, &mut scheduler);
+    scheduler.tick().unwrap();
+
+    let events = db.history_events();
+    let sub_child_ev = events.iter().find(|e| e.task_id == "sub_child");
+    assert!(sub_child_ev.is_some(), "sub_child of a finalizer must appear in history");
+    assert_eq!(sub_child_ev.unwrap().status, "SUCCEEDED");
+    assert_eq!(sub_child_ev.unwrap().graph_phase, "MAIN",
+        "children of finalizers execute as MAIN, not FINAL");
+}
+
+// --- Gap: SKIPPED-due-to-parent has error_message = None ---
+
+#[test]
+fn child_skipped_because_parent_failed_has_no_error_message() {
+    // Root fails → child must be SKIPPED with error_message = None.
+    // This is different from SKIPPED-due-to-disabled which carries "task is disabled".
+    let now = dt(2026, 2, 1, 12, 0, 59);
+    let clock = Arc::new(FakeClock::new(now));
+    let db = Arc::new(ProgrammableDb::new(
+        vec![version(
+            dt(2026, 2, 1, 12, 0, 0),
+            vec![
+                root_task("root", "CRON 0 * * * * * TZ=UTC", "SELECT root"),
+                child_task("child", "root", "CRON 0 * * * * * TZ=UTC", "SELECT child"),
+            ],
+        )],
+        clock.clone(),
+    ));
+    let mut scheduler = make_scheduler(db.clone(), clock.clone());
+    tick_past_minute(&clock, &mut scheduler);
+
+    db.set_failure_for_statement("SELECT root", "root failed");
+    let _ = scheduler.tick().unwrap_err();
+
+    let events = db.history_events();
+    let child_ev = events.iter().find(|e| e.task_id == "child").unwrap();
+    assert_eq!(child_ev.status, "SKIPPED");
+    assert!(
+        child_ev.error_message.is_none(),
+        "SKIPPED-due-to-parent-failure must have no error_message, got: {:?}",
+        child_ev.error_message
+    );
+}
+
+// --- Gap: SKIPPED-due-to-disabled has error_message = "task is disabled" ---
+
+#[test]
+fn disabled_child_skipped_with_task_is_disabled_message() {
+    // Root succeeds → disabled child must be SKIPPED with exactly "task is disabled".
+    let now = dt(2026, 2, 1, 12, 0, 59);
+    let clock = Arc::new(FakeClock::new(now));
+    let db = Arc::new(ProgrammableDb::new(
+        vec![version(
+            dt(2026, 2, 1, 12, 0, 0),
+            vec![
+                root_task("root", "CRON 0 * * * * * TZ=UTC", "SELECT root"),
+                disabled_child_task("disabled_child", "root", "CRON 0 * * * * * TZ=UTC", "SELECT disabled"),
+            ],
+        )],
+        clock.clone(),
+    ));
+    let mut scheduler = make_scheduler(db.clone(), clock.clone());
+    tick_past_minute(&clock, &mut scheduler);
+    scheduler.tick().unwrap();
+
+    let events = db.history_events();
+    let child_ev = events.iter().find(|e| e.task_id == "disabled_child").unwrap();
+    assert_eq!(child_ev.status, "SKIPPED");
+    assert_eq!(
+        child_ev.error_message.as_deref(),
+        Some("task is disabled"),
+        "SKIPPED-due-to-disabled must carry 'task is disabled' in error_message"
+    );
+}
+
+// --- Gap: finalizer always runs even when root failed (regression for the &self refactor) ---
+
+#[test]
+fn finalizer_of_failed_root_runs_and_is_not_skipped() {
+    // If execute_finalizer accidentally forwarded the real parent_status (FAILED) to
+    // execute_and_record, the finalizer would be SKIPPED instead of SUCCEEDED.
+    let now = dt(2026, 2, 1, 12, 0, 59);
+    let clock = Arc::new(FakeClock::new(now));
+    let db = Arc::new(ProgrammableDb::new(
+        vec![version(
+            dt(2026, 2, 1, 12, 0, 0),
+            vec![
+                root_task("root", "CRON 0 * * * * * TZ=UTC", "SELECT root"),
+                finalizer_task("fin", "root", "CRON 0 * * * * * TZ=UTC", "SELECT fin"),
+            ],
+        )],
+        clock.clone(),
+    ));
+    let mut scheduler = make_scheduler(db.clone(), clock.clone());
+    tick_past_minute(&clock, &mut scheduler);
+
+    db.set_failure_for_statement("SELECT root", "root failed");
+    let _ = scheduler.tick().unwrap_err();
+
+    let events = db.history_events();
+    let fin_ev = events.iter().find(|e| e.task_id == "fin").unwrap();
+    assert_eq!(fin_ev.status, "SUCCEEDED",
+        "finalizer must run (SUCCEEDED) even when root failed; got: {}", fin_ev.status);
+    assert_eq!(fin_ev.graph_phase, "FINAL");
 }

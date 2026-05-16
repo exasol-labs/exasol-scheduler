@@ -181,14 +181,13 @@ impl Scheduler {
             );
 
             let graph_run_id = Uuid::new_v4();
-            let mut runner = GraphRunner {
+            let runner = GraphRunner {
                 db: &*self.db,
                 clock: &*self.clock,
                 snapshot: &self.state.snapshot,
                 children_of: &self.state.children_of,
                 finalizers_of: &self.state.finalizers_of,
                 graph_run_id,
-                failed_children: 0,
             };
             let result = runner.run(&due);
             total_failed_children += result.failed_children;
@@ -317,11 +316,10 @@ struct GraphRunner<'a> {
     children_of: &'a HashMap<String, Vec<String>>,
     finalizers_of: &'a HashMap<String, Vec<String>>,
     graph_run_id: Uuid,
-    failed_children: usize,
 }
 
 impl<'a> GraphRunner<'a> {
-    fn run(&mut self, due: &DueRoot) -> GraphRunResult {
+    fn run(&self, due: &DueRoot) -> GraphRunResult {
         let started_at = self.clock.now();
         let exec_result = self.db.execute_statement(&due.statement);
         let finished_at = self.clock.now();
@@ -350,61 +348,79 @@ impl<'a> GraphRunner<'a> {
             tracing::warn!(task_id = due.task_id.as_str(), error = %e, "write_history failed");
         }
 
-        let children = self.children_of.get(&due.task_id).cloned().unwrap_or_default();
-        for child_id in children {
-            self.execute_node(&child_id, &status, 1);
-        }
-
-        let finalizers = self.finalizers_of.get(&due.task_id).cloned().unwrap_or_default();
-        for finalizer_id in finalizers {
-            self.execute_finalizer(&finalizer_id, 1);
-        }
+        let child_failures = self.execute_children_of(&due.task_id, &status, 0);
+        let finalizer_failures = self.execute_finalizers_of(&due.task_id, 0);
 
         GraphRunResult {
             root_err,
-            failed_children: self.failed_children,
+            failed_children: child_failures + finalizer_failures,
         }
     }
 
-    fn execute_node(&mut self, task_id: &str, parent_status: &str, depth: usize) {
+    fn execute_node(&self, task_id: &str, parent_status: &str, depth: usize) -> usize {
         if depth > MAX_GRAPH_DEPTH {
             tracing::warn!(task_id, "max graph depth exceeded, skipping node");
-            return;
+            return 0;
         }
 
         let Some(task) = self.snapshot.get(task_id).cloned() else {
-            return;
+            return 0;
         };
 
-        let (status, started_at, finished_at, error_message) = if parent_status != "SUCCEEDED" {
-            let t = self.clock.now();
-            ("SKIPPED".to_string(), t, None, None)
-        } else if !task.enabled {
-            let t = self.clock.now();
-            ("SKIPPED".to_string(), t, None, Some("task is disabled".to_string()))
-        } else {
-            let started_at = self.clock.now();
-            let exec_result = self.db.execute_statement(&task.statement);
-            let finished_at = self.clock.now();
-            match exec_result {
-                Ok(_) => ("SUCCEEDED".to_string(), started_at, Some(finished_at), None),
-                Err(e) => {
-                    self.failed_children += 1;
-                    (
-                        "FAILED".to_string(),
-                        started_at,
-                        Some(finished_at),
-                        Some(e.to_string()),
-                    )
-                }
-            }
+        let (status, own_failures) = self.execute_and_record(&task, parent_status, "MAIN");
+        let child_failures = self.execute_children_of(task_id, &status, depth);
+        let finalizer_failures = self.execute_finalizers_of(task_id, depth);
+        own_failures + child_failures + finalizer_failures
+    }
+
+    fn execute_finalizer(&self, task_id: &str, depth: usize) -> usize {
+        if depth > MAX_GRAPH_DEPTH {
+            tracing::warn!(task_id, "max graph depth exceeded, skipping finalizer");
+            return 0;
+        }
+
+        let Some(task) = self.snapshot.get(task_id).cloned() else {
+            return 0;
         };
+
+        // Pass "SUCCEEDED" so execute_and_record's parent-status check never fires —
+        // finalizers are never skipped due to parent outcome, only due to being disabled.
+        let (status, own_failures) = self.execute_and_record(&task, "SUCCEEDED", "FINAL");
+        let child_failures = self.execute_children_of(task_id, &status, depth);
+        // Finalizers do not recurse into their own finalizers.
+        own_failures + child_failures
+    }
+
+    fn execute_and_record(
+        &self,
+        task: &TaskDef,
+        parent_status: &str,
+        graph_phase: &str,
+    ) -> (String, usize) {
+        let (status, started_at, finished_at, error_message) =
+            if parent_status != "SUCCEEDED" {
+                let t = self.clock.now();
+                ("SKIPPED".to_string(), t, None, None)
+            } else if !task.enabled {
+                let t = self.clock.now();
+                ("SKIPPED".to_string(), t, None, Some("task is disabled".to_string()))
+            } else {
+                let started_at = self.clock.now();
+                let exec_result = self.db.execute_statement(&task.statement);
+                let finished_at = self.clock.now();
+                match exec_result {
+                    Ok(_) => ("SUCCEEDED".to_string(), started_at, Some(finished_at), None),
+                    Err(e) => ("FAILED".to_string(), started_at, Some(finished_at), Some(e.to_string())),
+                }
+            };
+
+        let own_failures = usize::from(status == "FAILED");
 
         let event = HistoryEvent {
             run_id: Uuid::new_v4(),
             graph_run_id: Some(self.graph_run_id),
-            task_id: task_id.to_string(),
-            graph_phase: "MAIN".to_string(),
+            task_id: task.task_id.clone(),
+            graph_phase: graph_phase.to_string(),
             scheduled_for: None,
             started_at,
             finished_at,
@@ -412,67 +428,75 @@ impl<'a> GraphRunner<'a> {
             error_message,
         };
         if let Err(e) = self.db.write_history(&event) {
-            tracing::warn!(task_id, error = %e, "write_history failed");
+            tracing::warn!(task_id = task.task_id.as_str(), error = %e, "write_history failed");
         }
 
-        let children = self.children_of.get(task_id).cloned().unwrap_or_default();
-        for child_id in children {
-            self.execute_node(&child_id, &status, depth + 1);
+        (status, own_failures)
+    }
+
+    fn execute_children_of(&self, parent_id: &str, parent_status: &str, depth: usize) -> usize {
+        let children = self.children_of
+            .get(parent_id)
+            .cloned()
+            .unwrap_or_default();
+
+        if children.is_empty() {
+            return 0;
         }
 
-        // Finalizers always run regardless of this node's status
-        let finalizers = self.finalizers_of.get(task_id).cloned().unwrap_or_default();
-        for finalizer_id in finalizers {
-            self.execute_finalizer(&finalizer_id, depth + 1);
+        let parallel = self.snapshot
+            .get(parent_id)
+            .map(|t| t.parallel_children)
+            .unwrap_or(true);
+
+        if !parallel || parent_status != "SUCCEEDED" {
+            // Sequential: explicit opt-out, or cascading SKIPPED (nothing useful to parallelise).
+            children.iter()
+                .map(|child_id| self.execute_node(child_id, parent_status, depth + 1))
+                .sum()
+        } else {
+            // Parallel (default). Collect ALL handles before joining any — joining before all
+            // are spawned blocks other threads from starting and destroys concurrency.
+            let mut total = 0usize;
+            std::thread::scope(|s| {
+                let handles: Vec<_> = children.iter()
+                    .map(|child_id| {
+                        std::thread::Builder::new()
+                            .name(format!("sched-child-{child_id}"))
+                            .spawn_scoped(s, || self.execute_node(child_id, "SUCCEEDED", depth + 1))
+                            .expect("failed to spawn scheduler thread")
+                    })
+                    .collect();
+                for handle in handles {
+                    match handle.join() {
+                        Ok(failures) => total += failures,
+                        Err(payload) => {
+                            let msg = payload.downcast_ref::<String>()
+                                .map(String::as_str)
+                                .or_else(|| payload.downcast_ref::<&str>().copied())
+                                .unwrap_or("<non-string panic payload>");
+                            tracing::error!(
+                                parent_id,
+                                panic_message = msg,
+                                "child execution thread panicked"
+                            );
+                            total += 1;
+                        }
+                    }
+                }
+            });
+            total
         }
     }
 
-    fn execute_finalizer(&mut self, task_id: &str, depth: usize) {
-        if depth > MAX_GRAPH_DEPTH {
-            tracing::warn!(task_id, "max graph depth exceeded, skipping finalizer");
-            return;
-        }
-
-        let Some(task) = self.snapshot.get(task_id).cloned() else {
-            return;
-        };
-
-        let (status, started_at, finished_at, error_message) = if !task.enabled {
-            let t = self.clock.now();
-            ("SKIPPED".to_string(), t, None, Some("task is disabled".to_string()))
-        } else {
-            let started_at = self.clock.now();
-            let exec_result = self.db.execute_statement(&task.statement);
-            let finished_at = self.clock.now();
-            match exec_result {
-                Ok(_) => ("SUCCEEDED".to_string(), started_at, Some(finished_at), None),
-                Err(e) => {
-                    self.failed_children += 1;
-                    ("FAILED".to_string(), started_at, Some(finished_at), Some(e.to_string()))
-                }
-            }
-        };
-
-        let event = HistoryEvent {
-            run_id: Uuid::new_v4(),
-            graph_run_id: Some(self.graph_run_id),
-            task_id: task_id.to_string(),
-            graph_phase: "FINAL".to_string(),
-            scheduled_for: None,
-            started_at,
-            finished_at,
-            status: status.clone(),
-            error_message,
-        };
-        if let Err(e) = self.db.write_history(&event) {
-            tracing::warn!(task_id, error = %e, "write_history failed");
-        }
-
-        // Finalizers can have non-finalizer sub-tasks
-        let children = self.children_of.get(task_id).cloned().unwrap_or_default();
-        for child_id in children {
-            self.execute_node(&child_id, &status, depth + 1);
-        }
+    fn execute_finalizers_of(&self, parent_id: &str, depth: usize) -> usize {
+        self.finalizers_of
+            .get(parent_id)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|finalizer_id| self.execute_finalizer(&finalizer_id, depth + 1))
+            .sum()
     }
 }
 
@@ -669,6 +693,7 @@ pub(crate) struct TaskDef {
     pub(crate) statement: String,
     pub(crate) after: Option<String>,
     pub(crate) is_final: bool,
+    pub(crate) parallel_children: bool,
     pub(crate) schedule_fingerprint: u64,
     pub(crate) fingerprint: u64,
 }
@@ -712,7 +737,7 @@ impl TaskDef {
             row.is_final,
         );
         let statement_hash = stable_hash(&row.statement);
-        let fingerprint = full_fingerprint(schedule_fingerprint, statement_hash);
+        let fingerprint = full_fingerprint(schedule_fingerprint, statement_hash, row.parallel_children);
 
         Self {
             task_id: row.task_id,
@@ -721,6 +746,7 @@ impl TaskDef {
             statement: row.statement,
             after,
             is_final: row.is_final,
+            parallel_children: row.parallel_children,
             schedule_fingerprint,
             fingerprint,
         }
@@ -847,10 +873,11 @@ fn schedule_fingerprint(
     hasher.finish()
 }
 
-fn full_fingerprint(schedule_fingerprint: u64, statement_hash: u64) -> u64 {
+fn full_fingerprint(schedule_fingerprint: u64, statement_hash: u64, parallel_children: bool) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     schedule_fingerprint.hash(&mut hasher);
     statement_hash.hash(&mut hasher);
+    parallel_children.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -878,8 +905,22 @@ mod dag_index_tests {
             statement: format!("SELECT {task_id}"),
             after: after.map(str::to_string),
             is_final,
+            parallel_children: true,
             schedule_fingerprint: 0,
             fingerprint: 0,
+        }
+    }
+
+    fn make_row(task_id: &str) -> crate::model::TaskRow {
+        crate::model::TaskRow {
+            task_id: task_id.to_string(),
+            enabled: true,
+            schedule: "CRON 0 * * * * * TZ=UTC".to_string(),
+            statement: format!("SELECT {task_id}"),
+            after: None,
+            is_final: false,
+            comment: None,
+            parallel_children: true,
         }
     }
 
@@ -967,5 +1008,19 @@ mod dag_index_tests {
         let (children, _) = build_dag_indexes(&snap);
         assert_eq!(children["root"], vec!["child_a", "child_b"]);
         assert_eq!(children["child_a"], vec!["grandchild"]);
+    }
+
+    #[test]
+    fn from_row_propagates_parallel_children_true() {
+        let row = crate::model::TaskRow { parallel_children: true, ..make_row("t") };
+        let task = TaskDef::from_row(row);
+        assert!(task.parallel_children);
+    }
+
+    #[test]
+    fn from_row_propagates_parallel_children_false() {
+        let row = crate::model::TaskRow { parallel_children: false, ..make_row("t") };
+        let task = TaskDef::from_row(row);
+        assert!(!task.parallel_children);
     }
 }

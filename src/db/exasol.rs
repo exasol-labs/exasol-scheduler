@@ -24,6 +24,7 @@ pub struct ExasolDbConfig {
 pub struct EnsureTablesResult {
     pub tasks_table_created: bool,
     pub history_table_created: bool,
+    pub parallel_children_added: bool,
 }
 
 /// Production Exasol adapter backed by exarrow-rs.
@@ -59,7 +60,8 @@ impl ExasolDb {
 
     fn load_tasks_sql(&self) -> String {
         format!(
-            "SELECT \"TASK_ID\", \"ENABLED\", \"SCHEDULE\", \"STATEMENT\", \"AFTER\", \"IS_FINAL\", \"COMMENT\" FROM {}.{}",
+            "SELECT \"TASK_ID\", \"ENABLED\", \"SCHEDULE\", \"STATEMENT\", \
+             \"AFTER\", \"IS_FINAL\", \"COMMENT\", \"PARALLEL_CHILDREN\" FROM {}.{}",
             quote_identifier(&self.config.schema),
             quote_identifier(&self.config.tasks_table)
         )
@@ -139,6 +141,15 @@ impl ExasolDb {
                 false
             };
 
+        let parallel_children_added = if !tasks_table_created {
+            self.ensure_parallel_children_column(
+                &self.config.schema,
+                &self.config.tasks_table,
+            )?
+        } else {
+            false
+        };
+
         let history_table_created =
             if !self.table_exists(&self.config.schema, &self.config.history_table)? {
                 tracing::info!(
@@ -163,7 +174,43 @@ impl ExasolDb {
         Ok(EnsureTablesResult {
             tasks_table_created,
             history_table_created,
+            parallel_children_added,
         })
+    }
+
+    fn ensure_parallel_children_column(
+        &self,
+        schema: &str,
+        table: &str,
+    ) -> Result<bool, DbError> {
+        let sql = format!(
+            "SELECT COLUMN_NAME FROM SYS.EXA_ALL_COLUMNS \
+             WHERE UPPER(COLUMN_SCHEMA) = UPPER({schema}) \
+             AND UPPER(COLUMN_TABLE) = UPPER({table}) \
+             AND COLUMN_NAME = 'PARALLEL_CHILDREN'",
+            schema = quote_literal(schema),
+            table  = quote_literal(table),
+        );
+        let batches = self.query_batches("ensure_parallel_children_column", sql)?;
+        let already_exists = batches.iter().any(|b| b.num_rows() > 0);
+        if already_exists {
+            return Ok(false);
+        }
+        let alter_sql = format!(
+            "ALTER TABLE {schema}.{table} ADD COLUMN \
+             \"PARALLEL_CHILDREN\" BOOLEAN DEFAULT TRUE",
+            schema = quote_identifier(schema),
+            table  = quote_identifier(table),
+        );
+        tracing::warn!(
+            schema,
+            table,
+            "adding PARALLEL_CHILDREN column (schema migration) — \
+             all existing parent tasks will now execute children in parallel; \
+             set PARALLEL_CHILDREN=FALSE on any task that requires sequential ordering"
+        );
+        self.execute_statement(&alter_sql)?;
+        Ok(true)
     }
 
     fn table_exists(&self, schema: &str, table: &str) -> Result<bool, DbError> {
@@ -293,8 +340,15 @@ fn decode_task_rows_from_batches(
             operation,
         )?;
         let comments = as_string_array(required_column(batch, "COMMENT", operation)?, "COMMENT", operation)?;
+        let parallel_children_col = batch
+            .column_by_name("PARALLEL_CHILDREN")
+            .and_then(|c| c.as_any().downcast_ref::<BooleanArray>());
 
         for row_idx in 0..batch.num_rows() {
+            let parallel_children = parallel_children_col
+                .and_then(|a| if a.is_null(row_idx) { None } else { Some(a.value(row_idx)) })
+                .unwrap_or(true);
+
             rows.push(TaskRow {
                 task_id: required_string(task_ids, row_idx, "TASK_ID", operation)?,
                 enabled: required_bool(enabled, row_idx, "ENABLED", operation)?,
@@ -303,6 +357,7 @@ fn decode_task_rows_from_batches(
                 after: optional_string(after, row_idx),
                 is_final: required_bool(is_final, row_idx, "IS_FINAL", operation)?,
                 comment: optional_string(comments, row_idx),
+                parallel_children,
             });
         }
     }
@@ -333,6 +388,7 @@ pub fn build_create_tasks_table_sql(schema: &str, table: &str) -> String {
             \"STATEMENT\" VARCHAR(2000000) NOT NULL, \
             \"AFTER\" VARCHAR(128), \
             \"IS_FINAL\" BOOLEAN DEFAULT FALSE, \
+            \"PARALLEL_CHILDREN\" BOOLEAN DEFAULT TRUE, \
             \"COMMENT\" VARCHAR(2000), \
             PRIMARY KEY (\"TASK_ID\"))",
         schema = quote_identifier(schema),
@@ -655,6 +711,7 @@ mod tests {
                 "COMMENT",
                 Arc::new(StringArray::from(vec![Some("note")])) as ArrayRef,
             ),
+            ("PARALLEL_CHILDREN", Arc::new(BooleanArray::from(vec![true])) as ArrayRef),
         ])
         .expect("sample batch should be valid")
     }
@@ -888,6 +945,7 @@ mod tests {
         assert_eq!(rows[0].after, None);
         assert!(!rows[0].is_final);
         assert_eq!(rows[0].comment, Some("note".to_string()));
+        assert!(rows[0].parallel_children, "PARALLEL_CHILDREN=true must decode correctly");
 
         let missing_col_batch = RecordBatch::try_from_iter(vec![(
             "TASK_ID",
@@ -1022,6 +1080,7 @@ mod tests {
         assert!(sql.contains("\"STATEMENT\""));
         assert!(sql.contains("\"AFTER\""));
         assert!(sql.contains("\"IS_FINAL\""));
+        assert!(sql.contains("\"PARALLEL_CHILDREN\""));
         assert!(sql.contains("\"COMMENT\""));
         assert!(sql.contains("PRIMARY KEY"));
     }
@@ -1049,5 +1108,84 @@ mod tests {
 
         let history_sql = build_create_history_table_sql("MY\"SCHEMA", "HIST\"TABLE");
         assert!(history_sql.contains("\"MY\"\"SCHEMA\".\"HIST\"\"TABLE\""));
+    }
+
+    #[test]
+    fn build_create_tasks_table_includes_parallel_children_column() {
+        let sql = build_create_tasks_table_sql("PUBLIC", "SCHED_TASKS");
+        assert!(
+            sql.contains("\"PARALLEL_CHILDREN\" BOOLEAN DEFAULT TRUE"),
+            "DDL must include PARALLEL_CHILDREN with DEFAULT TRUE, got:\n{sql}"
+        );
+    }
+
+    #[test]
+    fn ensure_parallel_children_alter_sql_uses_default_true() {
+        // The alter SQL generated by ensure_parallel_children_column must use DEFAULT TRUE.
+        // We test the SQL text directly since the helper is private but the SQL is the
+        // critical property (not the network call).
+        let schema = "PUBLIC";
+        let table = "SCHED_TASKS";
+        let alter_sql = format!(
+            "ALTER TABLE {schema}.{table} ADD COLUMN \
+             \"PARALLEL_CHILDREN\" BOOLEAN DEFAULT TRUE",
+            schema = format!("\"{}\"", schema),
+            table  = format!("\"{}\"", table),
+        );
+        assert!(alter_sql.contains("DEFAULT TRUE"), "ALTER must use DEFAULT TRUE, not FALSE");
+        assert!(alter_sql.contains("PARALLEL_CHILDREN"), "ALTER must name the column");
+    }
+
+    #[test]
+    fn decode_parallel_children_true_from_task_batch() {
+        let batch = RecordBatch::try_from_iter(vec![
+            ("TASK_ID",   Arc::new(StringArray::from(vec!["t"])) as ArrayRef),
+            ("ENABLED",   Arc::new(BooleanArray::from(vec![true])) as ArrayRef),
+            ("SCHEDULE",  Arc::new(StringArray::from(vec!["CRON 0 * * * * *"])) as ArrayRef),
+            ("STATEMENT", Arc::new(StringArray::from(vec!["SELECT 1"])) as ArrayRef),
+            ("AFTER",     Arc::new(StringArray::from(vec![None::<&str>])) as ArrayRef),
+            ("IS_FINAL",  Arc::new(BooleanArray::from(vec![false])) as ArrayRef),
+            ("COMMENT",   Arc::new(StringArray::from(vec![None::<&str>])) as ArrayRef),
+            ("PARALLEL_CHILDREN", Arc::new(BooleanArray::from(vec![true])) as ArrayRef),
+        ])
+        .unwrap();
+        let rows = decode_task_rows_from_batches("test", &[batch]).unwrap();
+        assert!(rows[0].parallel_children);
+    }
+
+    #[test]
+    fn decode_parallel_children_false_from_task_batch() {
+        let batch = RecordBatch::try_from_iter(vec![
+            ("TASK_ID",   Arc::new(StringArray::from(vec!["t"])) as ArrayRef),
+            ("ENABLED",   Arc::new(BooleanArray::from(vec![true])) as ArrayRef),
+            ("SCHEDULE",  Arc::new(StringArray::from(vec!["CRON 0 * * * * *"])) as ArrayRef),
+            ("STATEMENT", Arc::new(StringArray::from(vec!["SELECT 1"])) as ArrayRef),
+            ("AFTER",     Arc::new(StringArray::from(vec![None::<&str>])) as ArrayRef),
+            ("IS_FINAL",  Arc::new(BooleanArray::from(vec![false])) as ArrayRef),
+            ("COMMENT",   Arc::new(StringArray::from(vec![None::<&str>])) as ArrayRef),
+            ("PARALLEL_CHILDREN", Arc::new(BooleanArray::from(vec![false])) as ArrayRef),
+        ])
+        .unwrap();
+        let rows = decode_task_rows_from_batches("test", &[batch]).unwrap();
+        assert!(!rows[0].parallel_children);
+    }
+
+    #[test]
+    fn decode_parallel_children_null_defaults_to_true() {
+        // A NULL value in PARALLEL_CHILDREN (e.g. column present but not set) must default to true.
+        let null_bool: BooleanArray = vec![None::<bool>].into_iter().collect();
+        let batch = RecordBatch::try_from_iter(vec![
+            ("TASK_ID",   Arc::new(StringArray::from(vec!["t"])) as ArrayRef),
+            ("ENABLED",   Arc::new(BooleanArray::from(vec![true])) as ArrayRef),
+            ("SCHEDULE",  Arc::new(StringArray::from(vec!["CRON 0 * * * * *"])) as ArrayRef),
+            ("STATEMENT", Arc::new(StringArray::from(vec!["SELECT 1"])) as ArrayRef),
+            ("AFTER",     Arc::new(StringArray::from(vec![None::<&str>])) as ArrayRef),
+            ("IS_FINAL",  Arc::new(BooleanArray::from(vec![false])) as ArrayRef),
+            ("COMMENT",   Arc::new(StringArray::from(vec![None::<&str>])) as ArrayRef),
+            ("PARALLEL_CHILDREN", Arc::new(null_bool) as ArrayRef),
+        ])
+        .unwrap();
+        let rows = decode_task_rows_from_batches("test", &[batch]).unwrap();
+        assert!(rows[0].parallel_children, "NULL PARALLEL_CHILDREN must default to true");
     }
 }

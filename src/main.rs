@@ -127,6 +127,7 @@ mod tests {
             after: None,
             is_final: false,
             comment: None,
+            parallel_children: true,
         }
     }
 

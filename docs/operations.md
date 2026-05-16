@@ -145,6 +145,7 @@ tests/
   stage1_scheduler_integration.rs
   stage2_history.rs
   stage3_dag.rs
+  stage4_parallel.rs
   schedule_parsing.rs
   diff_fingerprinting.rs
   time_clock.rs

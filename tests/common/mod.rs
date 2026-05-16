@@ -4,7 +4,7 @@ use exasol_scheduler::model::{HistoryEvent, TaskRow};
 use exasol_scheduler::time::{Clock, FakeClock};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 #[derive(Debug, Clone)]
 pub struct DbVersion {
@@ -23,7 +23,7 @@ pub struct ProgrammableDb {
     versions: Vec<DbVersion>,
     active_version: Mutex<usize>,
     clock: Arc<FakeClock>,
-    failures_by_statement: Mutex<HashMap<String, String>>,
+    failures_by_statement: RwLock<HashMap<String, String>>,
     executions: Mutex<Vec<ExecutionRecord>>,
     history_events: Mutex<Vec<HistoryEvent>>,
     write_history_error: Mutex<Option<String>>,
@@ -40,7 +40,7 @@ impl ProgrammableDb {
             versions,
             active_version: Mutex::new(0),
             clock,
-            failures_by_statement: Mutex::new(HashMap::new()),
+            failures_by_statement: RwLock::new(HashMap::new()),
             executions: Mutex::new(Vec::new()),
             history_events: Mutex::new(Vec::new()),
             write_history_error: Mutex::new(None),
@@ -58,7 +58,7 @@ impl ProgrammableDb {
 
     pub fn set_failure_for_statement(&self, statement: &str, message: &str) {
         self.failures_by_statement
-            .lock()
+            .write()
             .expect("failures_by_statement poisoned")
             .insert(statement.to_string(), message.to_string());
     }
@@ -77,7 +77,7 @@ impl ProgrammableDb {
 
     pub fn clear_failures(&self) {
         self.failures_by_statement
-            .lock()
+            .write()
             .expect("failures_by_statement poisoned")
             .clear();
     }
@@ -143,7 +143,7 @@ impl SchedulerDb for ProgrammableDb {
 
         if let Some(message) = self
             .failures_by_statement
-            .lock()
+            .read()
             .expect("failures_by_statement poisoned")
             .get(sql)
             .cloned()
@@ -181,6 +181,14 @@ pub fn root_task(task_id: &str, schedule: &str, statement: &str) -> TaskRow {
         after: None,
         is_final: false,
         comment: None,
+        parallel_children: true,
+    }
+}
+
+pub fn sequential_root_task(task_id: &str, schedule: &str, statement: &str) -> TaskRow {
+    TaskRow {
+        parallel_children: false,
+        ..root_task(task_id, schedule, statement)
     }
 }
 
@@ -193,6 +201,7 @@ pub fn disabled_task(task_id: &str, schedule: &str, statement: &str) -> TaskRow 
         after: None,
         is_final: false,
         comment: None,
+        parallel_children: true,
     }
 }
 
@@ -205,6 +214,7 @@ pub fn child_task(task_id: &str, parent: &str, schedule: &str, statement: &str) 
         after: Some(parent.to_string()),
         is_final: false,
         comment: None,
+        parallel_children: true,
     }
 }
 
@@ -217,6 +227,7 @@ pub fn disabled_child_task(task_id: &str, parent: &str, schedule: &str, statemen
         after: Some(parent.to_string()),
         is_final: false,
         comment: None,
+        parallel_children: true,
     }
 }
 
@@ -229,5 +240,38 @@ pub fn finalizer_task(task_id: &str, parent: &str, schedule: &str, statement: &s
         after: Some(parent.to_string()),
         is_final: true,
         comment: None,
+        parallel_children: true,
+    }
+}
+
+// --- ProgrammableDb concurrent access test ---
+
+#[cfg(test)]
+mod programmable_db_tests {
+    use super::*;
+    use chrono::Utc;
+
+    #[test]
+    fn programmable_db_concurrent_reads_during_parallel_execution() {
+        let clock = Arc::new(FakeClock::new(Utc::now()));
+        let db = Arc::new(ProgrammableDb::new(
+            vec![DbVersion { last_changed: Utc::now(), tasks: vec![] }],
+            Arc::clone(&clock),
+        ));
+        db.set_failure_for_statement("FAIL", "injected failure");
+
+        std::thread::scope(|s| {
+            for i in 0..8 {
+                let db = Arc::clone(&db);
+                s.spawn(move || {
+                    let stmt = if i % 2 == 0 { "OK" } else { "FAIL" };
+                    let _ = db.execute_statement(stmt);
+                });
+            }
+        });
+
+        assert_eq!(db.execute_calls(), 8, "all 8 calls must be recorded");
+        let ok_count = db.executions().iter().filter(|e| e.statement == "OK").count();
+        assert_eq!(ok_count, 4, "4 OK calls must have been recorded");
     }
 }

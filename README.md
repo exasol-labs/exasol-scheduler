@@ -89,6 +89,7 @@ Tasks live in `SCHED_TASKS`. Each row is one executable unit.
 | `STATEMENT` | The SQL to execute — any valid Exasol SQL. |
 | `AFTER` | Parent task's `TASK_ID`. `NULL` for independently scheduled root tasks. |
 | `IS_FINAL` | When `TRUE`, this task always runs after its parent, even on failure. Default `FALSE`. |
+| `PARALLEL_CHILDREN` | When `TRUE` (default), all direct children of this task run in parallel threads. Set to `FALSE` to run children sequentially in alphabetical `TASK_ID` order. |
 | `COMMENT` | Free-text description. Ignored by the scheduler. |
 
 ### Root tasks
@@ -194,7 +195,7 @@ ORDER BY "STARTED_AT";
 ## Graph execution rules
 
 - **Root tasks trigger independently** on their cron schedule. Each trigger starts a new graph run with a shared `GRAPH_RUN_ID`.
-- **Children execute sequentially**, in alphabetical `TASK_ID` order. There is no parallel fan-out — if you need two independent operations to run concurrently, model them as separate root tasks (each will have its own `GRAPH_RUN_ID`).
+- **Children execute in parallel by default.** All direct children of a parent task run concurrently in separate threads. Set `PARALLEL_CHILDREN = FALSE` on the parent to run its children sequentially in alphabetical `TASK_ID` order instead.
 - **A failed or skipped parent** causes all its children to be skipped (recorded in history as `SKIPPED`).
 - **Finalizers always run**, even if their parent failed. They run after all regular children complete.
 - **Root failure is fatal** — the process supervisor should restart the binary. Child and finalizer failures are non-fatal: the scheduler logs a warning and continues.

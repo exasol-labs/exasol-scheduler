@@ -473,6 +473,7 @@ fn task_with_invalid_schedule_never_executes() {
                 after: None,
                 is_final: false,
                 comment: None,
+                parallel_children: true,
             }],
         )],
         clock.clone(),

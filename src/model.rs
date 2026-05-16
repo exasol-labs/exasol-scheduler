@@ -11,6 +11,7 @@ pub struct TaskRow {
     pub after: Option<String>,
     pub is_final: bool,
     pub comment: Option<String>,
+    pub parallel_children: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
