@@ -8,8 +8,8 @@ use exasol_scheduler::schedule::LocalTimeZone;
 use exasol_scheduler::scheduler::{DEFAULT_POLL_INTERVAL, ReloadStats, Scheduler};
 use exasol_scheduler::time::FakeClock;
 use pretty_assertions::assert_eq;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 fn dt(y: i32, m: u32, d: u32, hh: u32, mm: u32, ss: u32) -> DateTime<Utc> {
@@ -226,8 +226,10 @@ fn does_not_execute_disabled_child_finalizer_or_invalid_root_tasks() {
     let executions = db.executions();
     assert_eq!(executions.len(), 3, "root + child + finalizer");
     assert_eq!(executions[0].statement, "SQL GOOD");
-    let graph_stmts: std::collections::HashSet<_> =
-        executions[1..].iter().map(|r| r.statement.as_str()).collect();
+    let graph_stmts: std::collections::HashSet<_> = executions[1..]
+        .iter()
+        .map(|r| r.statement.as_str())
+        .collect();
     assert!(graph_stmts.contains("SQL CHILD"));
     assert!(graph_stmts.contains("SQL FINALIZER"));
 }
@@ -478,13 +480,17 @@ fn task_with_invalid_schedule_never_executes() {
         )],
         clock.clone(),
     ));
-    let mut scheduler = Scheduler::with_poll_interval(db.clone(), clock.clone(), Duration::from_secs(300));
+    let mut scheduler =
+        Scheduler::with_poll_interval(db.clone(), clock.clone(), Duration::from_secs(300));
 
     // Load snapshot
     let _ = scheduler.tick().unwrap();
     clock.advance(Duration::from_secs(1));
     // Tick at minute boundary — task must not execute
     let result = scheduler.tick().unwrap();
-    assert_eq!(result.executed_roots, 0, "task with invalid schedule must never fire");
+    assert_eq!(
+        result.executed_roots, 0,
+        "task with invalid schedule must never fire"
+    );
     assert_eq!(db.execute_calls(), 0, "no SQL must have been executed");
 }

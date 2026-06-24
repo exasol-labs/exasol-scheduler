@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use exasol_scheduler::config::AppConfig;
+use exasol_scheduler::config::{AppConfig, connection_target_from_dsn};
 use exasol_scheduler::db::ExasolDb;
 use exasol_scheduler::scheduler::{Scheduler, SchedulerError};
 use exasol_scheduler::time::{Clock, SystemClock};
@@ -33,22 +33,41 @@ fn run(cli_dsn: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
     // Optional positional CLI argument: exarrow-rs DSN (exasol://...).
     // This allows running without EXA_* env vars for credentials/host.
     let config = AppConfig::from_env_and_optional_dsn(cli_dsn)?;
-    tracing::info!(
-        schema = config.exasol.schema.as_str(),
-        tasks_table = config.exasol.tasks_table.as_str(),
-        history_table = config.exasol.history_table.as_str(),
-        poll_interval_secs = config.poll_interval.as_secs(),
-        "starting exasol scheduler"
-    );
+    if let Some(connection_target) = connection_target_from_dsn(&config.exasol.dsn) {
+        tracing::info!(
+            host = connection_target.host.as_str(),
+            port = connection_target.port,
+            schema = config.exasol.schema.as_str(),
+            tasks_table = config.exasol.tasks_table.as_str(),
+            history_table = config.exasol.history_table.as_str(),
+            poll_interval_secs = config.poll_interval.as_secs(),
+            "starting exasol scheduler"
+        );
+    } else {
+        tracing::info!(
+            host = "unparsed",
+            schema = config.exasol.schema.as_str(),
+            tasks_table = config.exasol.tasks_table.as_str(),
+            history_table = config.exasol.history_table.as_str(),
+            poll_interval_secs = config.poll_interval.as_secs(),
+            "starting exasol scheduler"
+        );
+    }
 
     let db = ExasolDb::new(config.exasol)?;
 
     let init = db.ensure_tables()?;
-    if init.tasks_table_created || init.history_table_created {
+    if init.tasks_table_created
+        || init.history_table_created
+        || init.sql_text_column_renamed
+        || init.parallel_children_added
+    {
         tracing::info!(
             tasks_table_created = init.tasks_table_created,
             history_table_created = init.history_table_created,
-            "created missing database tables"
+            sql_text_column_renamed = init.sql_text_column_renamed,
+            parallel_children_added = init.parallel_children_added,
+            "initialized scheduler database objects"
         );
     }
 
@@ -99,7 +118,9 @@ fn init_tracing() {
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
 
-    let _ = tracing_subscriber::fmt().with_env_filter(env_filter).try_init();
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(env_filter)
+        .try_init();
 }
 
 #[cfg(test)]
@@ -109,8 +130,8 @@ mod tests {
     use exasol_scheduler::db::{DbError, SchedulerDb};
     use exasol_scheduler::model::{HistoryEvent, TaskRow};
     use exasol_scheduler::time::FakeClock;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
     use uuid::Uuid;
 
@@ -248,11 +269,7 @@ mod tests {
         let clock = Arc::new(FakeClock::new(now));
         let db = Arc::new(InMemoryDb::new(
             dt(2026, 2, 1, 12, 0, 0),
-            vec![root_task(
-                "root",
-                "CRON 0 * * * * * TZ=UTC",
-                "SELECT 1",
-            )],
+            vec![root_task("root", "CRON 0 * * * * * TZ=UTC", "SELECT 1")],
         ));
         let mut scheduler =
             Scheduler::with_poll_interval(db.clone(), clock.clone(), Duration::from_secs(300));
@@ -276,7 +293,8 @@ mod tests {
         let now = dt(2026, 2, 1, 12, 0, 0);
         let clock = Arc::new(FakeClock::new(now));
         let db = Arc::new(AlwaysFailDb);
-        let mut scheduler = Scheduler::with_poll_interval(db, clock.clone(), Duration::from_secs(1));
+        let mut scheduler =
+            Scheduler::with_poll_interval(db, clock.clone(), Duration::from_secs(1));
 
         let err = run_scheduler_loop(&mut scheduler, clock).unwrap_err();
         assert!(err.to_string().contains("forced failure"));
@@ -301,7 +319,10 @@ mod tests {
     fn run_returns_error_when_exasol_connection_cannot_be_opened() {
         init_tracing();
         let err = run(Some("exasol://sys:pw@localhost:8563?tls=0".to_string())).unwrap_err();
-        assert!(err.to_string().contains("connection failed during ensure_tables"));
+        assert!(
+            err.to_string()
+                .contains("connection failed during execute_statement")
+        );
     }
 
     #[test]

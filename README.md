@@ -63,12 +63,12 @@ See [docs/configuration.md](docs/configuration.md) for the full list of environm
 
 ### 2. Add your first task
 
-The scheduler creates `SCHED_TASKS` and `SCHED_HISTORY` automatically on first startup — no DDL required. Once the binary is running, add tasks with plain SQL.
+The scheduler creates the default `SCHED` schema plus `SCHED_TASKS` and `SCHED_HISTORY` automatically on first startup — no DDL required. Once the binary is running, add tasks with plain SQL. If your deployment sets `EXA_SCHEMA`, replace `SCHED` in the examples with that schema.
 
 **Running SQL against Exasol:** You'll need an Exasol-compatible client. Options: [ExaPlus](https://docs.exasol.com/) (Exasol's native client), [DBeaver](https://dbeaver.io/) (community edition with the Exasol JDBC driver), or [pyexasol](https://github.com/exasol/pyexasol) (Python). Exasol uses a WebSocket-based protocol — standard tools like `psql` or `curl` are not compatible.
 
 ```sql
-INSERT INTO PUBLIC.SCHED_TASKS ("TASK_ID", "SCHEDULE", "STATEMENT")
+INSERT INTO SCHED.SCHED_TASKS ("TASK_ID", "SCHEDULE", "SQL_TEXT")
 VALUES (
     'hourly_cleanup',
     'CRON 0 0 * * * * TZ=UTC',
@@ -81,12 +81,14 @@ VALUES (
 
 Tasks live in `SCHED_TASKS`. Each row is one executable unit.
 
+Always double-quote scheduler column names in SQL. `SQL_TEXT` replaces the legacy `STATEMENT` column name, which conflicted with an Exasol reserved word.
+
 | Column | Description |
 |---|---|
 | `TASK_ID` | Unique identifier. Child tasks refer to their parent by this name. |
 | `ENABLED` | Set to `FALSE` to pause without deleting. Default `TRUE`. |
 | `SCHEDULE` | When to run. See [Schedule syntax](#schedule-syntax) below. |
-| `STATEMENT` | The SQL to execute — any valid Exasol SQL. |
+| `SQL_TEXT` | The SQL to execute — any valid Exasol SQL. |
 | `AFTER` | Parent task's `TASK_ID`. `NULL` for independently scheduled root tasks. |
 | `IS_FINAL` | When `TRUE`, this task always runs after its parent, even on failure. Default `FALSE`. |
 | `PARALLEL_CHILDREN` | When `TRUE` (default), all direct children of this task run in parallel threads. Set to `FALSE` to run children sequentially in alphabetical `TASK_ID` order. |
@@ -97,7 +99,7 @@ Tasks live in `SCHED_TASKS`. Each row is one executable unit.
 A root task has no `AFTER` value and fires on its own cron schedule.
 
 ```sql
-INSERT INTO PUBLIC.SCHED_TASKS ("TASK_ID", "SCHEDULE", "STATEMENT")
+INSERT INTO SCHED.SCHED_TASKS ("TASK_ID", "SCHEDULE", "SQL_TEXT")
 VALUES ('load_sales', 'CRON 0 0 6 * * * TZ=Europe/Berlin', 'EXECUTE SCRIPT ETL.LOAD_SALES()');
 ```
 
@@ -107,15 +109,15 @@ A child runs after its parent succeeds. Set `AFTER` to the parent's `TASK_ID`.
 
 ```sql
 -- Step 1: root
-INSERT INTO PUBLIC.SCHED_TASKS ("TASK_ID", "SCHEDULE", "STATEMENT")
+INSERT INTO SCHED.SCHED_TASKS ("TASK_ID", "SCHEDULE", "SQL_TEXT")
 VALUES ('extract', 'CRON 0 0 2 * * * TZ=UTC', 'EXECUTE SCRIPT ETL.EXTRACT()');
 
 -- Step 2: runs only when extract succeeds
-INSERT INTO PUBLIC.SCHED_TASKS ("TASK_ID", "SCHEDULE", "STATEMENT", "AFTER")
+INSERT INTO SCHED.SCHED_TASKS ("TASK_ID", "SCHEDULE", "SQL_TEXT", "AFTER")
 VALUES ('transform', 'CRON 0 0 2 * * * TZ=UTC', 'EXECUTE SCRIPT ETL.TRANSFORM()', 'extract');
 
 -- Step 3: runs only when transform succeeds
-INSERT INTO PUBLIC.SCHED_TASKS ("TASK_ID", "SCHEDULE", "STATEMENT", "AFTER")
+INSERT INTO SCHED.SCHED_TASKS ("TASK_ID", "SCHEDULE", "SQL_TEXT", "AFTER")
 VALUES ('load', 'CRON 0 0 2 * * * TZ=UTC', 'EXECUTE SCRIPT ETL.LOAD()', 'transform');
 ```
 
@@ -126,7 +128,7 @@ If `transform` fails, `load` is skipped and recorded as `SKIPPED` in the history
 A finalizer has `IS_FINAL = TRUE` and always runs after its parent — even if the parent failed or was skipped. Useful for notifications and cleanup.
 
 ```sql
-INSERT INTO PUBLIC.SCHED_TASKS ("TASK_ID", "SCHEDULE", "STATEMENT", "AFTER", "IS_FINAL")
+INSERT INTO SCHED.SCHED_TASKS ("TASK_ID", "SCHEDULE", "SQL_TEXT", "AFTER", "IS_FINAL")
 VALUES ('notify', 'CRON 0 0 2 * * * TZ=UTC', 'EXECUTE SCRIPT ETL.SEND_STATUS()', 'extract', TRUE);
 ```
 
@@ -159,15 +161,15 @@ Because tasks are just table rows, all management is plain SQL:
 
 ```sql
 -- Pause and resume
-UPDATE PUBLIC.SCHED_TASKS SET "ENABLED" = FALSE WHERE "TASK_ID" = 'load_sales';
-UPDATE PUBLIC.SCHED_TASKS SET "ENABLED" = TRUE  WHERE "TASK_ID" = 'load_sales';
+UPDATE SCHED.SCHED_TASKS SET "ENABLED" = FALSE WHERE "TASK_ID" = 'load_sales';
+UPDATE SCHED.SCHED_TASKS SET "ENABLED" = TRUE  WHERE "TASK_ID" = 'load_sales';
 
--- Change schedule or statement
-UPDATE PUBLIC.SCHED_TASKS SET "SCHEDULE"  = 'CRON 0 0 7 * * * TZ=UTC' WHERE "TASK_ID" = 'load_sales';
-UPDATE PUBLIC.SCHED_TASKS SET "STATEMENT" = 'EXECUTE SCRIPT ETL.LOAD_SALES_V2()' WHERE "TASK_ID" = 'load_sales';
+-- Change schedule or SQL text
+UPDATE SCHED.SCHED_TASKS SET "SCHEDULE"  = 'CRON 0 0 7 * * * TZ=UTC' WHERE "TASK_ID" = 'load_sales';
+UPDATE SCHED.SCHED_TASKS SET "SQL_TEXT" = 'EXECUTE SCRIPT ETL.LOAD_SALES_V2()' WHERE "TASK_ID" = 'load_sales';
 
 -- Remove
-DELETE FROM PUBLIC.SCHED_TASKS WHERE "TASK_ID" = 'obsolete_job';
+DELETE FROM SCHED.SCHED_TASKS WHERE "TASK_ID" = 'obsolete_job';
 ```
 
 The scheduler picks up every change on its next poll — no restart required.
@@ -181,9 +183,9 @@ Every execution writes a row to `SCHED_HISTORY`. `STATUS` is `SUCCEEDED`, `FAILE
 ```sql
 -- All steps in the most recent run of a pipeline
 SELECT "TASK_ID", "GRAPH_PHASE", "STATUS", "ERROR_MESSAGE", "STARTED_AT"
-FROM PUBLIC.SCHED_HISTORY
+FROM SCHED.SCHED_HISTORY
 WHERE "GRAPH_RUN_ID" = (
-    SELECT "GRAPH_RUN_ID" FROM PUBLIC.SCHED_HISTORY
+    SELECT "GRAPH_RUN_ID" FROM SCHED.SCHED_HISTORY
     WHERE "TASK_ID" = 'extract'
     ORDER BY "STARTED_AT" DESC LIMIT 1
 )

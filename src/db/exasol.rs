@@ -24,6 +24,7 @@ pub struct ExasolDbConfig {
 pub struct EnsureTablesResult {
     pub tasks_table_created: bool,
     pub history_table_created: bool,
+    pub sql_text_column_renamed: bool,
     pub parallel_children_added: bool,
 }
 
@@ -47,7 +48,9 @@ impl ExasolDb {
             return Err(DbError::Config("tasks table must not be empty".to_string()));
         }
         if config.history_table.trim().is_empty() {
-            return Err(DbError::Config("history table must not be empty".to_string()));
+            return Err(DbError::Config(
+                "history table must not be empty".to_string(),
+            ));
         }
 
         Ok(Self { config })
@@ -60,7 +63,7 @@ impl ExasolDb {
 
     fn load_tasks_sql(&self) -> String {
         format!(
-            "SELECT \"TASK_ID\", \"ENABLED\", \"SCHEDULE\", \"STATEMENT\", \
+            "SELECT \"TASK_ID\", \"ENABLED\", \"SCHEDULE\", \"SQL_TEXT\", \
              \"AFTER\", \"IS_FINAL\", \"COMMENT\", \"PARALLEL_CHILDREN\" FROM {}.{}",
             quote_identifier(&self.config.schema),
             quote_identifier(&self.config.tasks_table)
@@ -120,32 +123,35 @@ impl ExasolDb {
     /// Creates `SCHED_TASKS` and `SCHED_HISTORY` if they do not already exist.
     /// Safe to call on every startup — it is a no-op when both tables are present.
     pub fn ensure_tables(&self) -> Result<EnsureTablesResult, DbError> {
-        let tasks_table_created =
-            if !self.table_exists(&self.config.schema, &self.config.tasks_table)? {
-                tracing::info!(
-                    schema = self.config.schema.as_str(),
-                    table = self.config.tasks_table.as_str(),
-                    "creating table"
-                );
-                let sql = build_create_tasks_table_sql(
-                    &self.config.schema,
-                    &self.config.tasks_table,
-                );
-                self.execute_statement(&sql)?;
-                true
-            } else {
-                tracing::debug!(
-                    table = self.config.tasks_table.as_str(),
-                    "table already exists"
-                );
-                false
-            };
+        self.execute_schema_statement(&build_create_schema_sql(&self.config.schema))?;
+
+        let tasks_table_created = if !self
+            .table_exists(&self.config.schema, &self.config.tasks_table)?
+        {
+            tracing::info!(
+                schema = self.config.schema.as_str(),
+                table = self.config.tasks_table.as_str(),
+                "creating table"
+            );
+            let sql = build_create_tasks_table_sql(&self.config.schema, &self.config.tasks_table);
+            self.execute_schema_statement(&sql)?;
+            true
+        } else {
+            tracing::debug!(
+                table = self.config.tasks_table.as_str(),
+                "table already exists"
+            );
+            false
+        };
+
+        let sql_text_column_renamed = if !tasks_table_created {
+            self.ensure_sql_text_column(&self.config.schema, &self.config.tasks_table)?
+        } else {
+            false
+        };
 
         let parallel_children_added = if !tasks_table_created {
-            self.ensure_parallel_children_column(
-                &self.config.schema,
-                &self.config.tasks_table,
-            )?
+            self.ensure_parallel_children_column(&self.config.schema, &self.config.tasks_table)?
         } else {
             false
         };
@@ -157,11 +163,9 @@ impl ExasolDb {
                     table = self.config.history_table.as_str(),
                     "creating table"
                 );
-                let sql = build_create_history_table_sql(
-                    &self.config.schema,
-                    &self.config.history_table,
-                );
-                self.execute_statement(&sql)?;
+                let sql =
+                    build_create_history_table_sql(&self.config.schema, &self.config.history_table);
+                self.execute_schema_statement(&sql)?;
                 true
             } else {
                 tracing::debug!(
@@ -174,33 +178,41 @@ impl ExasolDb {
         Ok(EnsureTablesResult {
             tasks_table_created,
             history_table_created,
+            sql_text_column_renamed,
             parallel_children_added,
         })
     }
 
-    fn ensure_parallel_children_column(
-        &self,
-        schema: &str,
-        table: &str,
-    ) -> Result<bool, DbError> {
-        let sql = format!(
-            "SELECT COLUMN_NAME FROM SYS.EXA_ALL_COLUMNS \
-             WHERE UPPER(COLUMN_SCHEMA) = UPPER({schema}) \
-             AND UPPER(COLUMN_TABLE) = UPPER({table}) \
-             AND COLUMN_NAME = 'PARALLEL_CHILDREN'",
-            schema = quote_literal(schema),
-            table  = quote_literal(table),
+    fn ensure_sql_text_column(&self, schema: &str, table: &str) -> Result<bool, DbError> {
+        if self.column_exists(schema, table, "SQL_TEXT")? {
+            return Ok(false);
+        }
+
+        if !self.column_exists(schema, table, "STATEMENT")? {
+            return Err(DbError::Config(format!(
+                "task table {schema}.{table} is missing required SQL_TEXT column"
+            )));
+        }
+
+        let alter_sql = build_rename_statement_column_sql(schema, table);
+        tracing::warn!(
+            schema,
+            table,
+            "renaming legacy task column STATEMENT to SQL_TEXT"
         );
-        let batches = self.query_batches("ensure_parallel_children_column", sql)?;
-        let already_exists = batches.iter().any(|b| b.num_rows() > 0);
-        if already_exists {
+        self.execute_schema_statement(&alter_sql)?;
+        Ok(true)
+    }
+
+    fn ensure_parallel_children_column(&self, schema: &str, table: &str) -> Result<bool, DbError> {
+        if self.column_exists(schema, table, "PARALLEL_CHILDREN")? {
             return Ok(false);
         }
         let alter_sql = format!(
             "ALTER TABLE {schema}.{table} ADD COLUMN \
              \"PARALLEL_CHILDREN\" BOOLEAN DEFAULT TRUE",
             schema = quote_identifier(schema),
-            table  = quote_identifier(table),
+            table = quote_identifier(table),
         );
         tracing::warn!(
             schema,
@@ -209,8 +221,76 @@ impl ExasolDb {
              all existing parent tasks will now execute children in parallel; \
              set PARALLEL_CHILDREN=FALSE on any task that requires sequential ordering"
         );
-        self.execute_statement(&alter_sql)?;
+        self.execute_schema_statement(&alter_sql)?;
         Ok(true)
+    }
+
+    fn column_exists(&self, schema: &str, table: &str, column: &str) -> Result<bool, DbError> {
+        let sql = format!(
+            "SELECT COLUMN_NAME FROM SYS.EXA_ALL_COLUMNS \
+             WHERE UPPER(COLUMN_SCHEMA) = UPPER({schema}) \
+             AND UPPER(COLUMN_TABLE) = UPPER({table}) \
+             AND UPPER(COLUMN_NAME) = UPPER({column}) \
+             LIMIT 1",
+            schema = quote_literal(schema),
+            table = quote_literal(table),
+            column = quote_literal(column),
+        );
+        let batches = self.query_batches("ensure_task_column", sql)?;
+        Ok(batches.iter().any(|b| b.num_rows() > 0))
+    }
+
+    fn execute_schema_statement(&self, sql: &str) -> Result<(), DbError> {
+        self.execute_statement_internal(sql, Some(self.config.schema.as_str()))
+    }
+
+    fn execute_statement_internal(
+        &self,
+        sql: &str,
+        schema_hint: Option<&str>,
+    ) -> Result<(), DbError> {
+        let operation = "execute_statement";
+        let sql_text = sql.to_string();
+
+        Self::run_async(operation, async {
+            let mut connection = self.connect(operation).await?;
+
+            let result = async {
+                let result_set = connection
+                    .execute(sql_text.clone())
+                    .await
+                    .map_err(|source| {
+                        DbError::query_with_schema_hint(
+                            operation,
+                            sql_text.clone(),
+                            source,
+                            schema_hint,
+                        )
+                    })?;
+
+                if result_set.row_count().is_some() {
+                    return Ok(());
+                }
+
+                // Scheduled statements may be SELECTs; fetch and discard rows so
+                // server-side result handles are released while preserving success.
+                result_set.fetch_all().await.map(|_| ()).map_err(|source| {
+                    DbError::query_with_schema_hint(
+                        operation,
+                        sql_text.clone(),
+                        source,
+                        schema_hint,
+                    )
+                })
+            }
+            .await;
+
+            if let Err(close_err) = connection.close().await {
+                tracing::warn!(operation, error = %close_err, "failed to close Exasol connection");
+            }
+
+            result
+        })
     }
 
     fn table_exists(&self, schema: &str, table: &str) -> Result<bool, DbError> {
@@ -245,46 +325,23 @@ impl SchedulerDb for ExasolDb {
     }
 
     fn execute_statement(&self, sql: &str) -> Result<(), DbError> {
-        let operation = "execute_statement";
-        let sql_text = sql.to_string();
-
-        Self::run_async(operation, async {
-            let mut connection = self.connect(operation).await?;
-
-            // Use query() so that SELECT, DML, and DDL all work. The result set or
-            // row count is discarded — we only care whether the statement succeeded.
-            let result = connection
-                .query(sql_text.clone())
-                .await
-                .map(|_| ())
-                .map_err(|source| DbError::Query {
-                    operation,
-                    sql: sql_text,
-                    source,
-                });
-
-            if let Err(close_err) = connection.close().await {
-                tracing::warn!(operation, error = %close_err, "failed to close Exasol connection");
-            }
-
-            result
-        })
+        self.execute_statement_internal(sql, None)
     }
 
     fn write_history(&self, event: &HistoryEvent) -> Result<(), DbError> {
         let operation = "write_history";
-        let sql = build_write_history_sql(
-            &self.config.schema,
-            &self.config.history_table,
-            event,
-        );
+        let sql = build_write_history_sql(&self.config.schema, &self.config.history_table, event);
         Self::run_async(operation, async {
             let mut connection = self.connect(operation).await?;
             let result = connection
                 .execute_update(sql.clone())
                 .await
                 .map(|_| ())
-                .map_err(|source| DbError::Query { operation, sql, source });
+                .map_err(|source| DbError::Query {
+                    operation,
+                    sql,
+                    source,
+                });
             if let Err(close_err) = connection.close().await {
                 tracing::warn!(operation, error = %close_err, "failed to close Exasol connection");
             }
@@ -321,39 +378,61 @@ fn decode_task_rows_from_batches(
 ) -> Result<Vec<TaskRow>, DbError> {
     let mut rows = Vec::new();
     for batch in batches {
-        let task_ids = as_string_array(required_column(batch, "TASK_ID", operation)?, "TASK_ID", operation)?;
-        let enabled = as_bool_array(required_column(batch, "ENABLED", operation)?, "ENABLED", operation)?;
+        let task_ids = as_string_array(
+            required_column(batch, "TASK_ID", operation)?,
+            "TASK_ID",
+            operation,
+        )?;
+        let enabled = as_bool_array(
+            required_column(batch, "ENABLED", operation)?,
+            "ENABLED",
+            operation,
+        )?;
         let schedules = as_string_array(
             required_column(batch, "SCHEDULE", operation)?,
             "SCHEDULE",
             operation,
         )?;
         let statements = as_string_array(
-            required_column(batch, "STATEMENT", operation)?,
-            "STATEMENT",
+            required_column(batch, "SQL_TEXT", operation)?,
+            "SQL_TEXT",
             operation,
         )?;
-        let after = as_string_array(required_column(batch, "AFTER", operation)?, "AFTER", operation)?;
+        let after = as_string_array(
+            required_column(batch, "AFTER", operation)?,
+            "AFTER",
+            operation,
+        )?;
         let is_final = as_bool_array(
             required_column(batch, "IS_FINAL", operation)?,
             "IS_FINAL",
             operation,
         )?;
-        let comments = as_string_array(required_column(batch, "COMMENT", operation)?, "COMMENT", operation)?;
+        let comments = as_string_array(
+            required_column(batch, "COMMENT", operation)?,
+            "COMMENT",
+            operation,
+        )?;
         let parallel_children_col = batch
             .column_by_name("PARALLEL_CHILDREN")
             .and_then(|c| c.as_any().downcast_ref::<BooleanArray>());
 
         for row_idx in 0..batch.num_rows() {
             let parallel_children = parallel_children_col
-                .and_then(|a| if a.is_null(row_idx) { None } else { Some(a.value(row_idx)) })
+                .and_then(|a| {
+                    if a.is_null(row_idx) {
+                        None
+                    } else {
+                        Some(a.value(row_idx))
+                    }
+                })
                 .unwrap_or(true);
 
             rows.push(TaskRow {
                 task_id: required_string(task_ids, row_idx, "TASK_ID", operation)?,
                 enabled: required_bool(enabled, row_idx, "ENABLED", operation)?,
                 schedule: required_string(schedules, row_idx, "SCHEDULE", operation)?,
-                statement: required_string(statements, row_idx, "STATEMENT", operation)?,
+                statement: required_string(statements, row_idx, "SQL_TEXT", operation)?,
                 after: optional_string(after, row_idx),
                 is_final: required_bool(is_final, row_idx, "IS_FINAL", operation)?,
                 comment: optional_string(comments, row_idx),
@@ -379,13 +458,25 @@ pub fn build_tasks_last_changed_query(schema: &str, table: &str) -> String {
     )
 }
 
+fn build_create_schema_sql(schema: &str) -> String {
+    format!("CREATE SCHEMA IF NOT EXISTS {}", quote_identifier(schema))
+}
+
+fn build_rename_statement_column_sql(schema: &str, table: &str) -> String {
+    format!(
+        "ALTER TABLE {schema}.{table} RENAME COLUMN \"STATEMENT\" TO \"SQL_TEXT\"",
+        schema = quote_identifier(schema),
+        table = quote_identifier(table),
+    )
+}
+
 pub fn build_create_tasks_table_sql(schema: &str, table: &str) -> String {
     format!(
         "CREATE TABLE {schema}.{table} (\
             \"TASK_ID\" VARCHAR(128) NOT NULL, \
             \"ENABLED\" BOOLEAN DEFAULT TRUE, \
             \"SCHEDULE\" VARCHAR(512) NOT NULL, \
-            \"STATEMENT\" VARCHAR(2000000) NOT NULL, \
+            \"SQL_TEXT\" VARCHAR(2000000) NOT NULL, \
             \"AFTER\" VARCHAR(128), \
             \"IS_FINAL\" BOOLEAN DEFAULT FALSE, \
             \"PARALLEL_CHILDREN\" BOOLEAN DEFAULT TRUE, \
@@ -443,16 +534,16 @@ pub fn build_write_history_sql(schema: &str, history_table: &str, event: &Histor
           SCHEDULED_FOR, STARTED_AT, FINISHED_AT, STATUS, ERROR_MESSAGE) \
          VALUES ({run_id}, {graph_run_id}, {task_id}, {graph_phase}, \
                  {scheduled_for}, {started_at}, {finished_at}, {status}, {error_message})",
-        schema       = quote_identifier(schema),
-        table        = quote_identifier(history_table),
-        run_id       = quote_literal(&event.run_id.to_string()),
+        schema = quote_identifier(schema),
+        table = quote_identifier(history_table),
+        run_id = quote_literal(&event.run_id.to_string()),
         graph_run_id = graph_run_id,
-        task_id      = quote_literal(&event.task_id),
-        graph_phase  = quote_literal(&event.graph_phase),
+        task_id = quote_literal(&event.task_id),
+        graph_phase = quote_literal(&event.graph_phase),
         scheduled_for = scheduled_for,
-        started_at   = started_at,
-        finished_at  = finished_at,
-        status       = quote_literal(&event.status),
+        started_at = started_at,
+        finished_at = finished_at,
+        status = quote_literal(&event.status),
         error_message = error_message,
     )
 }
@@ -672,9 +763,9 @@ fn parse_timestamp_from_string(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::SchedulerDb;
     use arrow::array::ArrayRef;
     use chrono::{TimeZone, Timelike};
-    use crate::db::SchedulerDb;
     use std::sync::Arc;
     use uuid::Uuid;
 
@@ -693,25 +784,34 @@ mod tests {
                 "TASK_ID",
                 Arc::new(StringArray::from(vec!["task_1"])) as ArrayRef,
             ),
-            ("ENABLED", Arc::new(BooleanArray::from(vec![true])) as ArrayRef),
+            (
+                "ENABLED",
+                Arc::new(BooleanArray::from(vec![true])) as ArrayRef,
+            ),
             (
                 "SCHEDULE",
                 Arc::new(StringArray::from(vec!["CRON 0 * * * * * TZ=UTC"])) as ArrayRef,
             ),
             (
-                "STATEMENT",
+                "SQL_TEXT",
                 Arc::new(StringArray::from(vec!["SELECT 1"])) as ArrayRef,
             ),
             (
                 "AFTER",
                 Arc::new(StringArray::from(vec![None::<&str>])) as ArrayRef,
             ),
-            ("IS_FINAL", Arc::new(BooleanArray::from(vec![false])) as ArrayRef),
+            (
+                "IS_FINAL",
+                Arc::new(BooleanArray::from(vec![false])) as ArrayRef,
+            ),
             (
                 "COMMENT",
                 Arc::new(StringArray::from(vec![Some("note")])) as ArrayRef,
             ),
-            ("PARALLEL_CHILDREN", Arc::new(BooleanArray::from(vec![true])) as ArrayRef),
+            (
+                "PARALLEL_CHILDREN",
+                Arc::new(BooleanArray::from(vec![true])) as ArrayRef,
+            ),
         ])
         .expect("sample batch should be valid")
     }
@@ -805,9 +905,11 @@ mod tests {
                 .value(0),
             "task_1"
         );
-        assert!(as_bool_array(enabled_column, "ENABLED", "decode")
-            .unwrap()
-            .value(0));
+        assert!(
+            as_bool_array(enabled_column, "ENABLED", "decode")
+                .unwrap()
+                .value(0)
+        );
 
         let err = as_string_array(enabled_column, "ENABLED", "decode").unwrap_err();
         assert!(matches!(
@@ -945,7 +1047,10 @@ mod tests {
         assert_eq!(rows[0].after, None);
         assert!(!rows[0].is_final);
         assert_eq!(rows[0].comment, Some("note".to_string()));
-        assert!(rows[0].parallel_children, "PARALLEL_CHILDREN=true must decode correctly");
+        assert!(
+            rows[0].parallel_children,
+            "PARALLEL_CHILDREN=true must decode correctly"
+        );
 
         let missing_col_batch = RecordBatch::try_from_iter(vec![(
             "TASK_ID",
@@ -1077,7 +1182,8 @@ mod tests {
         assert!(sql.contains("\"TASK_ID\""));
         assert!(sql.contains("\"ENABLED\""));
         assert!(sql.contains("\"SCHEDULE\""));
-        assert!(sql.contains("\"STATEMENT\""));
+        assert!(sql.contains("\"SQL_TEXT\""));
+        assert!(!sql.contains("\"STATEMENT\""));
         assert!(sql.contains("\"AFTER\""));
         assert!(sql.contains("\"IS_FINAL\""));
         assert!(sql.contains("\"PARALLEL_CHILDREN\""));
@@ -1103,6 +1209,15 @@ mod tests {
 
     #[test]
     fn create_table_sql_functions_quote_identifiers() {
+        let schema_sql = build_create_schema_sql("MY\"SCHEMA");
+        assert_eq!(schema_sql, "CREATE SCHEMA IF NOT EXISTS \"MY\"\"SCHEMA\"");
+
+        let rename_sql = build_rename_statement_column_sql("MY\"SCHEMA", "MY\"TABLE");
+        assert_eq!(
+            rename_sql,
+            "ALTER TABLE \"MY\"\"SCHEMA\".\"MY\"\"TABLE\" RENAME COLUMN \"STATEMENT\" TO \"SQL_TEXT\""
+        );
+
         let tasks_sql = build_create_tasks_table_sql("MY\"SCHEMA", "MY\"TABLE");
         assert!(tasks_sql.contains("\"MY\"\"SCHEMA\".\"MY\"\"TABLE\""));
 
@@ -1130,23 +1245,53 @@ mod tests {
             "ALTER TABLE {schema}.{table} ADD COLUMN \
              \"PARALLEL_CHILDREN\" BOOLEAN DEFAULT TRUE",
             schema = format!("\"{}\"", schema),
-            table  = format!("\"{}\"", table),
+            table = format!("\"{}\"", table),
         );
-        assert!(alter_sql.contains("DEFAULT TRUE"), "ALTER must use DEFAULT TRUE, not FALSE");
-        assert!(alter_sql.contains("PARALLEL_CHILDREN"), "ALTER must name the column");
+        assert!(
+            alter_sql.contains("DEFAULT TRUE"),
+            "ALTER must use DEFAULT TRUE, not FALSE"
+        );
+        assert!(
+            alter_sql.contains("PARALLEL_CHILDREN"),
+            "ALTER must name the column"
+        );
     }
 
     #[test]
     fn decode_parallel_children_true_from_task_batch() {
         let batch = RecordBatch::try_from_iter(vec![
-            ("TASK_ID",   Arc::new(StringArray::from(vec!["t"])) as ArrayRef),
-            ("ENABLED",   Arc::new(BooleanArray::from(vec![true])) as ArrayRef),
-            ("SCHEDULE",  Arc::new(StringArray::from(vec!["CRON 0 * * * * *"])) as ArrayRef),
-            ("STATEMENT", Arc::new(StringArray::from(vec!["SELECT 1"])) as ArrayRef),
-            ("AFTER",     Arc::new(StringArray::from(vec![None::<&str>])) as ArrayRef),
-            ("IS_FINAL",  Arc::new(BooleanArray::from(vec![false])) as ArrayRef),
-            ("COMMENT",   Arc::new(StringArray::from(vec![None::<&str>])) as ArrayRef),
-            ("PARALLEL_CHILDREN", Arc::new(BooleanArray::from(vec![true])) as ArrayRef),
+            (
+                "TASK_ID",
+                Arc::new(StringArray::from(vec!["t"])) as ArrayRef,
+            ),
+            (
+                "ENABLED",
+                Arc::new(BooleanArray::from(vec![true])) as ArrayRef,
+            ),
+            (
+                "SCHEDULE",
+                Arc::new(StringArray::from(vec!["CRON 0 * * * * *"])) as ArrayRef,
+            ),
+            (
+                "SQL_TEXT",
+                Arc::new(StringArray::from(vec!["SELECT 1"])) as ArrayRef,
+            ),
+            (
+                "AFTER",
+                Arc::new(StringArray::from(vec![None::<&str>])) as ArrayRef,
+            ),
+            (
+                "IS_FINAL",
+                Arc::new(BooleanArray::from(vec![false])) as ArrayRef,
+            ),
+            (
+                "COMMENT",
+                Arc::new(StringArray::from(vec![None::<&str>])) as ArrayRef,
+            ),
+            (
+                "PARALLEL_CHILDREN",
+                Arc::new(BooleanArray::from(vec![true])) as ArrayRef,
+            ),
         ])
         .unwrap();
         let rows = decode_task_rows_from_batches("test", &[batch]).unwrap();
@@ -1156,14 +1301,38 @@ mod tests {
     #[test]
     fn decode_parallel_children_false_from_task_batch() {
         let batch = RecordBatch::try_from_iter(vec![
-            ("TASK_ID",   Arc::new(StringArray::from(vec!["t"])) as ArrayRef),
-            ("ENABLED",   Arc::new(BooleanArray::from(vec![true])) as ArrayRef),
-            ("SCHEDULE",  Arc::new(StringArray::from(vec!["CRON 0 * * * * *"])) as ArrayRef),
-            ("STATEMENT", Arc::new(StringArray::from(vec!["SELECT 1"])) as ArrayRef),
-            ("AFTER",     Arc::new(StringArray::from(vec![None::<&str>])) as ArrayRef),
-            ("IS_FINAL",  Arc::new(BooleanArray::from(vec![false])) as ArrayRef),
-            ("COMMENT",   Arc::new(StringArray::from(vec![None::<&str>])) as ArrayRef),
-            ("PARALLEL_CHILDREN", Arc::new(BooleanArray::from(vec![false])) as ArrayRef),
+            (
+                "TASK_ID",
+                Arc::new(StringArray::from(vec!["t"])) as ArrayRef,
+            ),
+            (
+                "ENABLED",
+                Arc::new(BooleanArray::from(vec![true])) as ArrayRef,
+            ),
+            (
+                "SCHEDULE",
+                Arc::new(StringArray::from(vec!["CRON 0 * * * * *"])) as ArrayRef,
+            ),
+            (
+                "SQL_TEXT",
+                Arc::new(StringArray::from(vec!["SELECT 1"])) as ArrayRef,
+            ),
+            (
+                "AFTER",
+                Arc::new(StringArray::from(vec![None::<&str>])) as ArrayRef,
+            ),
+            (
+                "IS_FINAL",
+                Arc::new(BooleanArray::from(vec![false])) as ArrayRef,
+            ),
+            (
+                "COMMENT",
+                Arc::new(StringArray::from(vec![None::<&str>])) as ArrayRef,
+            ),
+            (
+                "PARALLEL_CHILDREN",
+                Arc::new(BooleanArray::from(vec![false])) as ArrayRef,
+            ),
         ])
         .unwrap();
         let rows = decode_task_rows_from_batches("test", &[batch]).unwrap();
@@ -1175,17 +1344,41 @@ mod tests {
         // A NULL value in PARALLEL_CHILDREN (e.g. column present but not set) must default to true.
         let null_bool: BooleanArray = vec![None::<bool>].into_iter().collect();
         let batch = RecordBatch::try_from_iter(vec![
-            ("TASK_ID",   Arc::new(StringArray::from(vec!["t"])) as ArrayRef),
-            ("ENABLED",   Arc::new(BooleanArray::from(vec![true])) as ArrayRef),
-            ("SCHEDULE",  Arc::new(StringArray::from(vec!["CRON 0 * * * * *"])) as ArrayRef),
-            ("STATEMENT", Arc::new(StringArray::from(vec!["SELECT 1"])) as ArrayRef),
-            ("AFTER",     Arc::new(StringArray::from(vec![None::<&str>])) as ArrayRef),
-            ("IS_FINAL",  Arc::new(BooleanArray::from(vec![false])) as ArrayRef),
-            ("COMMENT",   Arc::new(StringArray::from(vec![None::<&str>])) as ArrayRef),
+            (
+                "TASK_ID",
+                Arc::new(StringArray::from(vec!["t"])) as ArrayRef,
+            ),
+            (
+                "ENABLED",
+                Arc::new(BooleanArray::from(vec![true])) as ArrayRef,
+            ),
+            (
+                "SCHEDULE",
+                Arc::new(StringArray::from(vec!["CRON 0 * * * * *"])) as ArrayRef,
+            ),
+            (
+                "SQL_TEXT",
+                Arc::new(StringArray::from(vec!["SELECT 1"])) as ArrayRef,
+            ),
+            (
+                "AFTER",
+                Arc::new(StringArray::from(vec![None::<&str>])) as ArrayRef,
+            ),
+            (
+                "IS_FINAL",
+                Arc::new(BooleanArray::from(vec![false])) as ArrayRef,
+            ),
+            (
+                "COMMENT",
+                Arc::new(StringArray::from(vec![None::<&str>])) as ArrayRef,
+            ),
             ("PARALLEL_CHILDREN", Arc::new(null_bool) as ArrayRef),
         ])
         .unwrap();
         let rows = decode_task_rows_from_batches("test", &[batch]).unwrap();
-        assert!(rows[0].parallel_children, "NULL PARALLEL_CHILDREN must default to true");
+        assert!(
+            rows[0].parallel_children,
+            "NULL PARALLEL_CHILDREN must default to true"
+        );
     }
 }

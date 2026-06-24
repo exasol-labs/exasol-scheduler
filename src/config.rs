@@ -5,6 +5,12 @@ use thiserror::Error;
 
 use crate::db::ExasolDbConfig;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectionTarget {
+    pub host: String,
+    pub port: u16,
+}
+
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub exasol: ExasolDbConfig,
@@ -27,7 +33,7 @@ impl AppConfig {
     }
 
     pub fn from_env_and_optional_dsn(cli_dsn: Option<String>) -> Result<Self, ConfigError> {
-        let schema = env_or_default("EXA_SCHEMA", "PUBLIC");
+        let schema = env_or_default("EXA_SCHEMA", "SCHED");
         let tasks_table = env_or_default("EXA_TASKS_TABLE", "SCHED_TASKS");
         let history_table = env_or_default("EXA_HISTORY_TABLE", "SCHED_HISTORY");
         let poll_interval_secs = parse_u64_env("POLL_INTERVAL_SECS", 10)?;
@@ -145,6 +151,16 @@ fn schema_from_dsn(dsn: &str) -> Option<String> {
     let driver = exarrow::adbc::Driver::new();
     let database = driver.open(dsn).ok()?;
     database.params().schema.clone()
+}
+
+pub fn connection_target_from_dsn(dsn: &str) -> Option<ConnectionTarget> {
+    // Reuse exarrow-rs' own parser so logging follows the same DSN semantics as connection setup.
+    let driver = exarrow::adbc::Driver::new();
+    let database = driver.open(dsn).ok()?;
+    Some(ConnectionTarget {
+        host: database.params().host.clone(),
+        port: database.params().port,
+    })
 }
 
 fn env_or_default(name: &str, default: &str) -> String {
@@ -307,8 +323,24 @@ mod tests {
 
             assert_eq!(from_env.exasol.dsn, from_explicit.exasol.dsn);
             assert_eq!(from_env.exasol.schema, from_explicit.exasol.schema);
-            assert_eq!(from_env.exasol.tasks_table, from_explicit.exasol.tasks_table);
+            assert_eq!(
+                from_env.exasol.tasks_table,
+                from_explicit.exasol.tasks_table
+            );
             assert_eq!(from_env.poll_interval, from_explicit.poll_interval);
+        });
+    }
+
+    #[test]
+    fn default_schema_is_sched_when_not_configured_elsewhere() {
+        with_clean_env(|| {
+            set_env("EXA_HOST", "db-host");
+            set_env("EXA_USER", "scheduler");
+            set_env("EXA_PASSWORD", "pw");
+
+            let config = AppConfig::from_env().expect("config should parse");
+
+            assert_eq!(config.exasol.schema, "SCHED");
         });
     }
 
@@ -339,13 +371,19 @@ mod tests {
     #[test]
     fn cli_dsn_takes_precedence_over_env_dsn() {
         with_clean_env(|| {
-            set_env("EXA_DSN", "exasol://env:env@localhost:8563/ENV_SCHEMA?tls=0");
+            set_env(
+                "EXA_DSN",
+                "exasol://env:env@localhost:8563/ENV_SCHEMA?tls=0",
+            );
             let config = AppConfig::from_env_and_optional_dsn(Some(
                 "  exasol://cli:cli@localhost:8563/CLI_SCHEMA?tls=0  ".to_string(),
             ))
             .expect("cli dsn should parse");
             assert!(
-                config.exasol.dsn.starts_with("exasol://cli:cli@localhost:8563/CLI_SCHEMA?tls=0"),
+                config
+                    .exasol
+                    .dsn
+                    .starts_with("exasol://cli:cli@localhost:8563/CLI_SCHEMA?tls=0"),
                 "cli dsn should win precedence"
             );
         });
@@ -512,7 +550,19 @@ mod tests {
             None,
             "invalid DSN should not produce schema"
         );
-        assert_eq!(env_or_default("EXA_SCHEMA", "PUBLIC"), "PUBLIC");
+        assert_eq!(
+            connection_target_from_dsn("this-is-not-a-dsn"),
+            None,
+            "invalid DSN should not produce connection target"
+        );
+        assert_eq!(
+            connection_target_from_dsn("exasol://u:p@db.example.com:9999/APP?tls=0"),
+            Some(ConnectionTarget {
+                host: "db.example.com".to_string(),
+                port: 9999,
+            })
+        );
+        assert_eq!(env_or_default("EXA_SCHEMA", "SCHED"), "SCHED");
         assert_eq!(bool_to_numeric(true), 1);
         assert_eq!(bool_to_numeric(false), 0);
 
@@ -522,7 +572,7 @@ mod tests {
             assert!(!is_env_set("EXA_SCHEMA"));
             set_env("EXA_SCHEMA", "APP");
             assert!(is_env_set("EXA_SCHEMA"));
-            assert_eq!(env_or_default("EXA_SCHEMA", "PUBLIC"), "APP");
+            assert_eq!(env_or_default("EXA_SCHEMA", "SCHED"), "APP");
         });
     }
 

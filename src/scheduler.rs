@@ -397,22 +397,31 @@ impl<'a> GraphRunner<'a> {
         parent_status: &str,
         graph_phase: &str,
     ) -> (String, usize) {
-        let (status, started_at, finished_at, error_message) =
-            if parent_status != "SUCCEEDED" {
-                let t = self.clock.now();
-                ("SKIPPED".to_string(), t, None, None)
-            } else if !task.enabled {
-                let t = self.clock.now();
-                ("SKIPPED".to_string(), t, None, Some("task is disabled".to_string()))
-            } else {
-                let started_at = self.clock.now();
-                let exec_result = self.db.execute_statement(&task.statement);
-                let finished_at = self.clock.now();
-                match exec_result {
-                    Ok(_) => ("SUCCEEDED".to_string(), started_at, Some(finished_at), None),
-                    Err(e) => ("FAILED".to_string(), started_at, Some(finished_at), Some(e.to_string())),
-                }
-            };
+        let (status, started_at, finished_at, error_message) = if parent_status != "SUCCEEDED" {
+            let t = self.clock.now();
+            ("SKIPPED".to_string(), t, None, None)
+        } else if !task.enabled {
+            let t = self.clock.now();
+            (
+                "SKIPPED".to_string(),
+                t,
+                None,
+                Some("task is disabled".to_string()),
+            )
+        } else {
+            let started_at = self.clock.now();
+            let exec_result = self.db.execute_statement(&task.statement);
+            let finished_at = self.clock.now();
+            match exec_result {
+                Ok(_) => ("SUCCEEDED".to_string(), started_at, Some(finished_at), None),
+                Err(e) => (
+                    "FAILED".to_string(),
+                    started_at,
+                    Some(finished_at),
+                    Some(e.to_string()),
+                ),
+            }
+        };
 
         let own_failures = usize::from(status == "FAILED");
 
@@ -435,23 +444,22 @@ impl<'a> GraphRunner<'a> {
     }
 
     fn execute_children_of(&self, parent_id: &str, parent_status: &str, depth: usize) -> usize {
-        let children = self.children_of
-            .get(parent_id)
-            .cloned()
-            .unwrap_or_default();
+        let children = self.children_of.get(parent_id).cloned().unwrap_or_default();
 
         if children.is_empty() {
             return 0;
         }
 
-        let parallel = self.snapshot
+        let parallel = self
+            .snapshot
             .get(parent_id)
             .map(|t| t.parallel_children)
             .unwrap_or(true);
 
         if !parallel || parent_status != "SUCCEEDED" {
             // Sequential: explicit opt-out, or cascading SKIPPED (nothing useful to parallelise).
-            children.iter()
+            children
+                .iter()
                 .map(|child_id| self.execute_node(child_id, parent_status, depth + 1))
                 .sum()
         } else {
@@ -459,7 +467,8 @@ impl<'a> GraphRunner<'a> {
             // are spawned blocks other threads from starting and destroys concurrency.
             let mut total = 0usize;
             std::thread::scope(|s| {
-                let handles: Vec<_> = children.iter()
+                let handles: Vec<_> = children
+                    .iter()
                     .map(|child_id| {
                         std::thread::Builder::new()
                             .name(format!("sched-child-{child_id}"))
@@ -471,7 +480,8 @@ impl<'a> GraphRunner<'a> {
                     match handle.join() {
                         Ok(failures) => total += failures,
                         Err(payload) => {
-                            let msg = payload.downcast_ref::<String>()
+                            let msg = payload
+                                .downcast_ref::<String>()
                                 .map(String::as_str)
                                 .or_else(|| payload.downcast_ref::<&str>().copied())
                                 .unwrap_or("<non-string panic payload>");
@@ -737,7 +747,8 @@ impl TaskDef {
             row.is_final,
         );
         let statement_hash = stable_hash(&row.statement);
-        let fingerprint = full_fingerprint(schedule_fingerprint, statement_hash, row.parallel_children);
+        let fingerprint =
+            full_fingerprint(schedule_fingerprint, statement_hash, row.parallel_children);
 
         Self {
             task_id: row.task_id,
@@ -873,7 +884,11 @@ fn schedule_fingerprint(
     hasher.finish()
 }
 
-fn full_fingerprint(schedule_fingerprint: u64, statement_hash: u64, parallel_children: bool) -> u64 {
+fn full_fingerprint(
+    schedule_fingerprint: u64,
+    statement_hash: u64,
+    parallel_children: bool,
+) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     schedule_fingerprint.hash(&mut hasher);
     statement_hash.hash(&mut hasher);
@@ -1012,14 +1027,20 @@ mod dag_index_tests {
 
     #[test]
     fn from_row_propagates_parallel_children_true() {
-        let row = crate::model::TaskRow { parallel_children: true, ..make_row("t") };
+        let row = crate::model::TaskRow {
+            parallel_children: true,
+            ..make_row("t")
+        };
         let task = TaskDef::from_row(row);
         assert!(task.parallel_children);
     }
 
     #[test]
     fn from_row_propagates_parallel_children_false() {
-        let row = crate::model::TaskRow { parallel_children: false, ..make_row("t") };
+        let row = crate::model::TaskRow {
+            parallel_children: false,
+            ..make_row("t")
+        };
         let task = TaskDef::from_row(row);
         assert!(!task.parallel_children);
     }

@@ -38,15 +38,11 @@ Boolean environment variables (`EXA_TLS`, `EXA_VALIDATE_SERVER_CERT`) accept: `1
 
 | Variable | Default | Description |
 |---|---|---|
-| `EXA_SCHEMA` | `PUBLIC` | Schema that contains the task and history tables. The schema must already exist — the scheduler will not create it. |
+| `EXA_SCHEMA` | `SCHED` | Schema that contains the task and history tables. The scheduler creates it on startup if it does not already exist. |
 | `EXA_TASKS_TABLE` | `SCHED_TASKS` | Name of the task definitions table. |
 | `EXA_HISTORY_TABLE` | `SCHED_HISTORY` | Name of the execution history table. |
 
-> **Note:** If you use a non-default `EXA_SCHEMA`, create the schema before starting the scheduler:
-> ```sql
-> CREATE SCHEMA my_schema;
-> ```
-> The scheduler creates the task and history tables within the schema automatically, but will fail with an error if the schema itself does not exist.
+The scheduler creates the schema, task table, and history table automatically on first startup. If the scheduler user is not allowed to create schemas or tables, create those objects manually and grant the runtime privileges described in [security.md](security.md) before startup.
 
 ---
 
@@ -85,14 +81,14 @@ exasol_scheduler
 
 ## Table DDL Reference
 
-The scheduler creates these tables automatically on first startup (if they do not already exist). To create them manually — or to inspect their schema — use this DDL. Replace `"PUBLIC"` with your `EXA_SCHEMA` value if different.
+The scheduler creates the schema and these tables automatically on first startup (if they do not already exist). To create them manually — or to inspect their schema — use this DDL. Replace `"SCHED"` with your `EXA_SCHEMA` value if different.
 
 ```sql
-CREATE TABLE "PUBLIC"."SCHED_TASKS" (
+CREATE TABLE "SCHED"."SCHED_TASKS" (
     "TASK_ID"           VARCHAR(128) NOT NULL,
     "ENABLED"           BOOLEAN DEFAULT TRUE,
     "SCHEDULE"          VARCHAR(512) NOT NULL,
-    "STATEMENT"         VARCHAR(2000000) NOT NULL,
+    "SQL_TEXT"          VARCHAR(2000000) NOT NULL,
     "AFTER"             VARCHAR(128),
     "IS_FINAL"          BOOLEAN DEFAULT FALSE,
     "PARALLEL_CHILDREN" BOOLEAN DEFAULT TRUE,
@@ -100,7 +96,7 @@ CREATE TABLE "PUBLIC"."SCHED_TASKS" (
     PRIMARY KEY ("TASK_ID")
 );
 
-CREATE TABLE "PUBLIC"."SCHED_HISTORY" (
+CREATE TABLE "SCHED"."SCHED_HISTORY" (
     "RUN_ID"        VARCHAR(36) NOT NULL,
     "GRAPH_RUN_ID"  VARCHAR(36),
     "TASK_ID"       VARCHAR(128) NOT NULL,
@@ -114,9 +110,9 @@ CREATE TABLE "PUBLIC"."SCHED_HISTORY" (
 );
 ```
 
-If you create the tables manually before first startup, you can skip granting `CREATE TABLE` to the scheduler user entirely. See [security.md](security.md#minimum-privileges-at-first-startup).
+If you create the schema and tables manually before first startup, you can skip granting `CREATE SCHEMA` and `CREATE TABLE` to the scheduler user entirely. See [security.md](security.md#minimum-privileges-at-first-startup).
 
-> **Upgrading from an earlier version:** If `SCHED_TASKS` already exists without the `PARALLEL_CHILDREN` column, the scheduler adds it automatically on startup via `ALTER TABLE ... ADD COLUMN "PARALLEL_CHILDREN" BOOLEAN DEFAULT TRUE`. This sets all existing tasks to parallel execution (the new default). If any pipeline requires sequential child execution, update those root tasks before or after upgrading:
+> **Upgrading from an earlier version:** If `SCHED_TASKS` still has the legacy `"STATEMENT"` column, the scheduler renames it to `"SQL_TEXT"` automatically on startup. If the table exists without the `PARALLEL_CHILDREN` column, the scheduler adds it automatically via `ALTER TABLE ... ADD COLUMN "PARALLEL_CHILDREN" BOOLEAN DEFAULT TRUE`. This sets all existing tasks to parallel execution (the new default). If any pipeline requires sequential child execution, update those root tasks before or after upgrading:
 > ```sql
-> UPDATE PUBLIC.SCHED_TASKS SET "PARALLEL_CHILDREN" = FALSE WHERE "TASK_ID" = 'your_root_task';
+> UPDATE SCHED.SCHED_TASKS SET "PARALLEL_CHILDREN" = FALSE WHERE "TASK_ID" = 'your_root_task';
 > ```

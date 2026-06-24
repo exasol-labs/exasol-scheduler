@@ -2,7 +2,7 @@
 
 ## The trust model
 
-The scheduler executes SQL statements by running them verbatim against Exasol under the credentials it was started with. There is no sandboxing, templating, or parameterisation — the `STATEMENT` column is passed directly to the database driver.
+The scheduler executes SQL statements by running them verbatim against Exasol under the credentials it was started with. There is no sandboxing, templating, or parameterisation — the `SQL_TEXT` column is passed directly to the database driver.
 
 This means **the `SCHED_TASKS` table is a code-execution surface**. Any principal that can `INSERT` or `UPDATE` a row in that table can run arbitrary SQL as the scheduler user. Treat write access to `SCHED_TASKS` with the same gravity as write access to your CI/CD pipeline or production deployment scripts.
 
@@ -14,7 +14,7 @@ Never run the scheduler as `SYS` or any DBA account. Create a purpose-built user
 
 ### Minimum privileges at first startup
 
-On first startup the scheduler creates `SCHED_TASKS` and `SCHED_HISTORY` if they do not exist. `CREATE TABLE` on the schema is needed for that one operation.
+On first startup the scheduler creates the configured schema, `SCHED_TASKS`, and `SCHED_HISTORY` if they do not exist. If you let the scheduler bootstrap these objects, grant schema and table creation only for first startup, then revoke those privileges after the objects exist.
 
 ```sql
 -- Create the dedicated user (Exasol requires double-quoted password literals)
@@ -24,27 +24,31 @@ GRANT CREATE SESSION TO scheduler_svc;
 -- Change-detection: the scheduler reads SYS.EXA_ALL_OBJECTS
 -- This view reflects objects the session can already see, so no extra grant is needed.
 
--- Task table (read-only for the scheduler itself)
-GRANT SELECT ON TABLE PUBLIC.SCHED_TASKS TO scheduler_svc;
-
--- History table (append-only)
-GRANT INSERT ON TABLE PUBLIC.SCHED_HISTORY TO scheduler_svc;
-
--- First-startup table creation (can be revoked after both tables exist)
+-- First-startup bootstrap (can be revoked after schema and tables exist)
+GRANT CREATE SCHEMA TO scheduler_svc;
 GRANT CREATE TABLE TO scheduler_svc;
 ```
 
-Once the tables are confirmed to exist, revoke `CREATE TABLE`:
+Once the schema and tables are confirmed to exist, revoke the bootstrap privileges:
 
 ```sql
+REVOKE CREATE SCHEMA FROM scheduler_svc;
 REVOKE CREATE TABLE FROM scheduler_svc;
 ```
 
-Alternatively, create the tables yourself before starting the scheduler for the first time (reference DDL is in [configuration.md](configuration.md#table-ddl-reference)), and never grant `CREATE TABLE` at all.
+This bootstrap path is convenient, but the scheduler user may remain the owner of the objects it created. For strict least privilege, create the schema and tables yourself before starting the scheduler for the first time (reference DDL is in [configuration.md](configuration.md#table-ddl-reference)), and never grant `CREATE SCHEMA` or `CREATE TABLE` at all:
+
+```sql
+-- Task table (read-only for the scheduler itself)
+GRANT SELECT ON TABLE SCHED.SCHED_TASKS TO scheduler_svc;
+
+-- History table (append-only)
+GRANT INSERT ON TABLE SCHED.SCHED_HISTORY TO scheduler_svc;
+```
 
 ### Runtime privileges for scheduled SQL
 
-The scheduler user also needs whatever privileges the SQL in each task's `STATEMENT` column requires. Grant these as specifically as possible:
+The scheduler user also needs whatever privileges the SQL in each task's `SQL_TEXT` column requires. Grant these as specifically as possible:
 
 ```sql
 -- Prefer: EXECUTE on a specific script
@@ -60,7 +64,7 @@ Wrapping ETL logic in stored scripts and granting `EXECUTE` on those scripts kee
 
 ## Control who can write to SCHED_TASKS
 
-The `SCHED_TASKS` table should only be writable by a small, audited set of principals. A typical access model:
+The `SCHED_TASKS` table should only be writable by a small, audited set of principals. A typical strict least-privilege access model:
 
 | Role | SCHED_TASKS | SCHED_HISTORY |
 |---|---|---|
@@ -74,8 +78,8 @@ Grant `SELECT` on both tables to any user who needs to query the schedule or aud
 ```sql
 -- Example: a read-only monitoring role
 CREATE ROLE scheduler_reader;
-GRANT SELECT ON TABLE PUBLIC.SCHED_TASKS   TO scheduler_reader;
-GRANT SELECT ON TABLE PUBLIC.SCHED_HISTORY TO scheduler_reader;
+GRANT SELECT ON TABLE SCHED.SCHED_TASKS   TO scheduler_reader;
+GRANT SELECT ON TABLE SCHED.SCHED_HISTORY TO scheduler_reader;
 GRANT scheduler_reader TO analyst_user;
 ```
 
@@ -128,12 +132,12 @@ To detect unexpected changes to the task schedule, run these two queries:
 SELECT LAST_COMMIT
 FROM   SYS.EXA_ALL_OBJECTS
 WHERE  ROOT_TYPE = 'SCHEMA'
-AND    UPPER(ROOT_NAME)   = UPPER('PUBLIC')
+AND    UPPER(ROOT_NAME)   = UPPER('SCHED')
 AND    UPPER(OBJECT_NAME) = UPPER('SCHED_TASKS');
 
 -- What tasks are currently scheduled?
-SELECT "TASK_ID", "ENABLED", "SCHEDULE", "STATEMENT"
-FROM   PUBLIC.SCHED_TASKS
+SELECT "TASK_ID", "ENABLED", "SCHEDULE", "SQL_TEXT"
+FROM   SCHED.SCHED_TASKS
 ORDER  BY "TASK_ID";
 ```
 
@@ -144,7 +148,7 @@ Alert when the `LAST_COMMIT` timestamp advances outside of planned deployment wi
 ## Hardening checklist
 
 - [ ] The scheduler connects as a dedicated, non-DBA user (`scheduler_svc`)
-- [ ] `CREATE TABLE` has been revoked from `scheduler_svc` after first startup
+- [ ] `CREATE SCHEMA` and `CREATE TABLE` have been revoked from `scheduler_svc` after first startup
 - [ ] `INSERT`/`UPDATE`/`DELETE` on `SCHED_TASKS` is restricted to the DBA and deployment pipeline only
 - [ ] Application users and ETL users have at most `SELECT` on `SCHED_TASKS`
 - [ ] TLS is enabled (`EXA_TLS=true`)

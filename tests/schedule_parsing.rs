@@ -127,7 +127,10 @@ fn iana_timezone_path_produces_expected_next_fire_time() {
     let parsed = ParsedSchedule::parse("CRON 0 0 9 * * * TZ=Europe/Copenhagen").unwrap();
     let now = Utc.with_ymd_and_hms(2026, 1, 1, 7, 0, 0).unwrap();
     let next = parsed.next_after_with_local(now, LocalTimeZone::Named(chrono_tz::UTC));
-    assert_eq!(next, Some(Utc.with_ymd_and_hms(2026, 1, 1, 8, 0, 0).unwrap()));
+    assert_eq!(
+        next,
+        Some(Utc.with_ymd_and_hms(2026, 1, 1, 8, 0, 0).unwrap())
+    );
 }
 
 // DOW remapping: standard cron (0/7=Sun, 1=Mon…6=Sat) → cron-rs (1=Sun, 2=Mon…7=Sat)
@@ -176,7 +179,10 @@ fn dow_range_1_to_5_means_monday_to_friday() {
     // Advance to Friday — next should be following Monday, not Saturday
     let friday = Utc.with_ymd_and_hms(2026, 1, 9, 10, 0, 0).unwrap(); // 2026-01-09 Fri
     let after_friday = parsed.next_after(friday).unwrap();
-    assert_eq!(after_friday, Utc.with_ymd_and_hms(2026, 1, 12, 9, 0, 0).unwrap());
+    assert_eq!(
+        after_friday,
+        Utc.with_ymd_and_hms(2026, 1, 12, 9, 0, 0).unwrap()
+    );
 }
 
 #[test]

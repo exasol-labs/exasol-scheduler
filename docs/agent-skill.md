@@ -7,7 +7,7 @@ completely before issuing any SQL. Every rule below is load-bearing.
 
 ## What the scheduler does
 
-The scheduler polls `SCHED_TASKS` for due tasks and executes their `STATEMENT` column
+The scheduler polls `SCHED_TASKS` for due tasks and executes their `SQL_TEXT` column
 verbatim against Exasol. It is the only component that writes to `SCHED_HISTORY`. Your
 job as an agent is to manage `SCHED_TASKS` rows via SQL and read `SCHED_HISTORY` for
 status. You never interact with the scheduler process directly.
@@ -97,10 +97,19 @@ skipped with a warning log.
 
 ## SQL conventions — mandatory
 
-**All column names must be double-quoted.** The following are reserved Exasol keywords
-and will cause a syntax error if unquoted:
+The default scheduler schema is `SCHED`. All templates below use `SCHED.SCHED_TASKS`
+and `SCHED.SCHED_HISTORY`. If the deployment sets `EXA_SCHEMA` to another value,
+replace `SCHED` with that configured schema in every SQL statement.
 
-`AFTER`, `STATEMENT`, `SCHEDULE`, `COMMENT`, `IS_FINAL`, `STATUS`, `ENABLED`,
+The scheduler creates the configured schema, task table, and history table
+automatically on startup. As an agent managing pipelines, do not issue bootstrap DDL
+unless the user explicitly asks you to repair or provision scheduler storage.
+
+**All column names must be double-quoted.** `SQL_TEXT` is the current SQL body column.
+Do not use the legacy `STATEMENT` column name in new SQL. The following scheduler
+columns include reserved Exasol keywords and will cause a syntax error if unquoted:
+
+`AFTER`, `SCHEDULE`, `COMMENT`, `IS_FINAL`, `STATUS`, `ENABLED`,
 `STARTED_AT`, `FINISHED_AT`, `GRAPH_PHASE`, `SCHEDULED_FOR`, `ERROR_MESSAGE`
 
 **Always use double-quoted identifiers in every query.**
@@ -114,8 +123,8 @@ Use these templates. Replace values in `ALL_CAPS`. Do not change the quoting.
 ### Insert a root task
 
 ```sql
-INSERT INTO PUBLIC.SCHED_TASKS (
-    "TASK_ID", "ENABLED", "SCHEDULE", "STATEMENT", "COMMENT"
+INSERT INTO SCHED.SCHED_TASKS (
+    "TASK_ID", "ENABLED", "SCHEDULE", "SQL_TEXT", "COMMENT"
 )
 VALUES (
     'TASK_ID',
@@ -129,8 +138,8 @@ VALUES (
 ### Insert a child task
 
 ```sql
-INSERT INTO PUBLIC.SCHED_TASKS (
-    "TASK_ID", "ENABLED", "SCHEDULE", "STATEMENT", "AFTER", "COMMENT"
+INSERT INTO SCHED.SCHED_TASKS (
+    "TASK_ID", "ENABLED", "SCHEDULE", "SQL_TEXT", "AFTER", "COMMENT"
 )
 VALUES (
     'CHILD_ID',
@@ -145,8 +154,8 @@ VALUES (
 ### Insert a finalizer
 
 ```sql
-INSERT INTO PUBLIC.SCHED_TASKS (
-    "TASK_ID", "ENABLED", "SCHEDULE", "STATEMENT", "AFTER", "IS_FINAL", "COMMENT"
+INSERT INTO SCHED.SCHED_TASKS (
+    "TASK_ID", "ENABLED", "SCHEDULE", "SQL_TEXT", "AFTER", "IS_FINAL", "COMMENT"
 )
 VALUES (
     'FINAL_ID',
@@ -162,17 +171,17 @@ VALUES (
 ### Enable / disable a task
 
 ```sql
-UPDATE PUBLIC.SCHED_TASKS SET "ENABLED" = FALSE WHERE "TASK_ID" = 'TASK_ID';
-UPDATE PUBLIC.SCHED_TASKS SET "ENABLED" = TRUE  WHERE "TASK_ID" = 'TASK_ID';
+UPDATE SCHED.SCHED_TASKS SET "ENABLED" = FALSE WHERE "TASK_ID" = 'TASK_ID';
+UPDATE SCHED.SCHED_TASKS SET "ENABLED" = TRUE  WHERE "TASK_ID" = 'TASK_ID';
 ```
 
-### Update schedule or statement
+### Update schedule or SQL text
 
 ```sql
-UPDATE PUBLIC.SCHED_TASKS SET "SCHEDULE"  = 'CRON 0 0 8 * * * TZ=UTC'
+UPDATE SCHED.SCHED_TASKS SET "SCHEDULE"  = 'CRON 0 0 8 * * * TZ=UTC'
 WHERE "TASK_ID" = 'TASK_ID';
 
-UPDATE PUBLIC.SCHED_TASKS SET "STATEMENT" = 'EXECUTE SCRIPT MY_SCHEMA.NEW_PROC()'
+UPDATE SCHED.SCHED_TASKS SET "SQL_TEXT" = 'EXECUTE SCRIPT MY_SCHEMA.NEW_PROC()'
 WHERE "TASK_ID" = 'TASK_ID';
 ```
 
@@ -182,7 +191,7 @@ Deleting a parent does not cascade. Children become orphans and are silently exc
 from execution on the next snapshot reload.
 
 ```sql
-DELETE FROM PUBLIC.SCHED_TASKS WHERE "TASK_ID" = 'TASK_ID';
+DELETE FROM SCHED.SCHED_TASKS WHERE "TASK_ID" = 'TASK_ID';
 ```
 
 ### Delete a pipeline (root + all descendants)
@@ -190,7 +199,7 @@ DELETE FROM PUBLIC.SCHED_TASKS WHERE "TASK_ID" = 'TASK_ID';
 Collect the full set of `TASK_ID` values first via the inspection queries below, then:
 
 ```sql
-DELETE FROM PUBLIC.SCHED_TASKS
+DELETE FROM SCHED.SCHED_TASKS
 WHERE "TASK_ID" IN ('root', 'child_a', 'child_b', 'finalizer');
 ```
 
@@ -253,7 +262,7 @@ within `2 × POLL_INTERVAL_SECS` of an expected fire time, the process may have 
 
 ```sql
 SELECT MAX("STARTED_AT") AS "LAST_ACTIVITY"
-FROM PUBLIC.SCHED_HISTORY;
+FROM SCHED.SCHED_HISTORY;
 ```
 
 ### Get the latest run of a pipeline
@@ -261,9 +270,9 @@ FROM PUBLIC.SCHED_HISTORY;
 ```sql
 SELECT "TASK_ID", "GRAPH_PHASE", "STATUS", "ERROR_MESSAGE",
        "SCHEDULED_FOR", "STARTED_AT", "FINISHED_AT"
-FROM PUBLIC.SCHED_HISTORY
+FROM SCHED.SCHED_HISTORY
 WHERE "GRAPH_RUN_ID" = (
-    SELECT "GRAPH_RUN_ID" FROM PUBLIC.SCHED_HISTORY
+    SELECT "GRAPH_RUN_ID" FROM SCHED.SCHED_HISTORY
     WHERE "TASK_ID" = 'ROOT_TASK_ID'
     ORDER BY "STARTED_AT" DESC LIMIT 1
 )
@@ -274,7 +283,7 @@ ORDER BY "STARTED_AT";
 
 ```sql
 SELECT "TASK_ID", "STATUS", "ERROR_MESSAGE", "STARTED_AT"
-FROM PUBLIC.SCHED_HISTORY
+FROM SCHED.SCHED_HISTORY
 WHERE "STATUS" = 'FAILED'
   AND "STARTED_AT" > ADD_SECONDS(CURRENT_TIMESTAMP, -3600)
 ORDER BY "STARTED_AT" DESC;
@@ -284,7 +293,7 @@ ORDER BY "STARTED_AT" DESC;
 
 ```sql
 SELECT COUNT(*) AS "SUCCESS_COUNT"
-FROM PUBLIC.SCHED_HISTORY
+FROM SCHED.SCHED_HISTORY
 WHERE "TASK_ID"  = 'TASK_ID'
   AND "STATUS"   = 'SUCCEEDED'
   AND "STARTED_AT" > TIMESTAMP '2026-01-01 00:00:00';
@@ -295,18 +304,18 @@ WHERE "TASK_ID"  = 'TASK_ID'
 ```sql
 -- All root tasks
 SELECT "TASK_ID", "ENABLED", "SCHEDULE"
-FROM PUBLIC.SCHED_TASKS
+FROM SCHED.SCHED_TASKS
 WHERE "AFTER" IS NULL AND "IS_FINAL" = FALSE
 ORDER BY "TASK_ID";
 
 -- Full pipeline tree
 SELECT "TASK_ID", "ENABLED", "AFTER", "IS_FINAL", "SCHEDULE"
-FROM PUBLIC.SCHED_TASKS
+FROM SCHED.SCHED_TASKS
 ORDER BY "AFTER" NULLS FIRST, "IS_FINAL", "TASK_ID";
 
 -- Single task
-SELECT "TASK_ID", "ENABLED", "SCHEDULE", "STATEMENT", "AFTER", "IS_FINAL", "PARALLEL_CHILDREN", "COMMENT"
-FROM PUBLIC.SCHED_TASKS
+SELECT "TASK_ID", "ENABLED", "SCHEDULE", "SQL_TEXT", "AFTER", "IS_FINAL", "PARALLEL_CHILDREN", "COMMENT"
+FROM SCHED.SCHED_TASKS
 WHERE "TASK_ID" = 'TASK_ID';
 ```
 
@@ -332,13 +341,13 @@ activity in `SCHED_HISTORY` (scheduler process has exited).
 2. Decide whether to fix the underlying issue immediately or disable the task.
 3. Disable the failing task to prevent crash-loop on restart:
    ```sql
-   UPDATE PUBLIC.SCHED_TASKS SET "ENABLED" = FALSE WHERE "TASK_ID" = 'FAILING_ROOT';
+   UPDATE SCHED.SCHED_TASKS SET "ENABLED" = FALSE WHERE "TASK_ID" = 'FAILING_ROOT';
    ```
 4. Signal the process supervisor to restart the scheduler binary.
-5. Fix the root cause (update `STATEMENT`, grant missing privileges, etc.).
+5. Fix the root cause (update `SQL_TEXT`, grant missing privileges, etc.).
 6. Re-enable the task:
    ```sql
-   UPDATE PUBLIC.SCHED_TASKS SET "ENABLED" = TRUE WHERE "TASK_ID" = 'FAILING_ROOT';
+   UPDATE SCHED.SCHED_TASKS SET "ENABLED" = TRUE WHERE "TASK_ID" = 'FAILING_ROOT';
    ```
 
 ### Scenario: child task fails repeatedly
@@ -349,7 +358,7 @@ activity in `SCHED_HISTORY` (scheduler process has exited).
 1. Read `ERROR_MESSAGE`.
 2. Optionally disable to stop downstream SKIPPED noise:
    ```sql
-   UPDATE PUBLIC.SCHED_TASKS SET "ENABLED" = FALSE WHERE "TASK_ID" = 'FAILING_CHILD';
+   UPDATE SCHED.SCHED_TASKS SET "ENABLED" = FALSE WHERE "TASK_ID" = 'FAILING_CHILD';
    ```
 3. Fix the root cause.
 4. Re-enable.
@@ -378,26 +387,26 @@ The scheduler has no distributed lock. Each instance independently fires every d
 
 ```sql
 -- Root
-INSERT INTO PUBLIC.SCHED_TASKS ("TASK_ID","ENABLED","SCHEDULE","STATEMENT","COMMENT")
+INSERT INTO SCHED.SCHED_TASKS ("TASK_ID","ENABLED","SCHEDULE","SQL_TEXT","COMMENT")
 VALUES ('etl_extract','TRUE','CRON 0 0 2 * * * TZ=UTC','EXECUTE SCRIPT ETL.EXTRACT()','Step 1');
 
 -- Child (fires when extract succeeds)
-INSERT INTO PUBLIC.SCHED_TASKS ("TASK_ID","ENABLED","SCHEDULE","STATEMENT","AFTER","COMMENT")
+INSERT INTO SCHED.SCHED_TASKS ("TASK_ID","ENABLED","SCHEDULE","SQL_TEXT","AFTER","COMMENT")
 VALUES ('etl_transform',TRUE,'CRON 0 0 2 * * * TZ=UTC','EXECUTE SCRIPT ETL.TRANSFORM()','etl_extract','Step 2');
 
 -- Grandchild (fires when transform succeeds)
-INSERT INTO PUBLIC.SCHED_TASKS ("TASK_ID","ENABLED","SCHEDULE","STATEMENT","AFTER","COMMENT")
+INSERT INTO SCHED.SCHED_TASKS ("TASK_ID","ENABLED","SCHEDULE","SQL_TEXT","AFTER","COMMENT")
 VALUES ('etl_load',TRUE,'CRON 0 0 2 * * * TZ=UTC','EXECUTE SCRIPT ETL.LOAD()','etl_transform','Step 3');
 
 -- Finalizer on root (always runs, regardless of pipeline outcome)
-INSERT INTO PUBLIC.SCHED_TASKS ("TASK_ID","ENABLED","SCHEDULE","STATEMENT","AFTER","IS_FINAL","COMMENT")
+INSERT INTO SCHED.SCHED_TASKS ("TASK_ID","ENABLED","SCHEDULE","SQL_TEXT","AFTER","IS_FINAL","COMMENT")
 VALUES ('etl_notify',TRUE,'CRON 0 0 2 * * * TZ=UTC','EXECUTE SCRIPT ETL.SEND_STATUS()','etl_extract',TRUE,'Notify on complete or failure');
 ```
 
 ### Pause an entire pipeline without deleting it
 
 ```sql
-UPDATE PUBLIC.SCHED_TASKS SET "ENABLED" = FALSE
+UPDATE SCHED.SCHED_TASKS SET "ENABLED" = FALSE
 WHERE "TASK_ID" IN ('etl_extract','etl_transform','etl_load','etl_notify');
 ```
 
@@ -410,7 +419,7 @@ root does fire.
 Only the root task's `SCHEDULE` matters. Update only the root:
 
 ```sql
-UPDATE PUBLIC.SCHED_TASKS SET "SCHEDULE" = 'CRON 0 0 4 * * * TZ=UTC'
+UPDATE SCHED.SCHED_TASKS SET "SCHEDULE" = 'CRON 0 0 4 * * * TZ=UTC'
 WHERE "TASK_ID" = 'etl_extract';
 ```
 
@@ -423,15 +432,15 @@ Model parallel branches as siblings under a shared root:
 
 ```sql
 -- Root: triggers the fan-out
-INSERT INTO PUBLIC.SCHED_TASKS ("TASK_ID","ENABLED","SCHEDULE","STATEMENT")
+INSERT INTO SCHED.SCHED_TASKS ("TASK_ID","ENABLED","SCHEDULE","SQL_TEXT")
 VALUES ('pipeline_root',TRUE,'CRON 0 0 3 * * * TZ=UTC','SELECT 1');
 
 -- Branch A (runs in parallel with branch_b when root succeeds)
-INSERT INTO PUBLIC.SCHED_TASKS ("TASK_ID","ENABLED","SCHEDULE","STATEMENT","AFTER")
+INSERT INTO SCHED.SCHED_TASKS ("TASK_ID","ENABLED","SCHEDULE","SQL_TEXT","AFTER")
 VALUES ('branch_a',TRUE,'CRON 0 0 3 * * * TZ=UTC','EXECUTE SCRIPT ETL.BRANCH_A()','pipeline_root');
 
 -- Branch B (runs in parallel with branch_a)
-INSERT INTO PUBLIC.SCHED_TASKS ("TASK_ID","ENABLED","SCHEDULE","STATEMENT","AFTER")
+INSERT INTO SCHED.SCHED_TASKS ("TASK_ID","ENABLED","SCHEDULE","SQL_TEXT","AFTER")
 VALUES ('branch_b',TRUE,'CRON 0 0 3 * * * TZ=UTC','EXECUTE SCRIPT ETL.BRANCH_B()','pipeline_root');
 ```
 
@@ -440,7 +449,7 @@ All branches share the same `GRAPH_RUN_ID`, so history is automatically correlat
 To force sequential execution instead, set `PARALLEL_CHILDREN = FALSE` on the parent:
 
 ```sql
-UPDATE PUBLIC.SCHED_TASKS SET "PARALLEL_CHILDREN" = FALSE WHERE "TASK_ID" = 'pipeline_root';
+UPDATE SCHED.SCHED_TASKS SET "PARALLEL_CHILDREN" = FALSE WHERE "TASK_ID" = 'pipeline_root';
 ```
 
 ### Trigger a pipeline outside its normal schedule
@@ -449,13 +458,13 @@ There is no manual trigger API. To run a task immediately:
 
 1. Temporarily change the schedule to fire within the next poll interval:
    ```sql
-   UPDATE PUBLIC.SCHED_TASKS SET "SCHEDULE" = 'CRON 0 * * * * * TZ=UTC'
+   UPDATE SCHED.SCHED_TASKS SET "SCHEDULE" = 'CRON 0 * * * * * TZ=UTC'
    WHERE "TASK_ID" = 'etl_extract';
    ```
 2. Wait for the execution to appear in `SCHED_HISTORY` (within `POLL_INTERVAL_SECS`).
 3. Restore the original schedule:
    ```sql
-   UPDATE PUBLIC.SCHED_TASKS SET "SCHEDULE" = 'CRON 0 0 2 * * * TZ=UTC'
+   UPDATE SCHED.SCHED_TASKS SET "SCHEDULE" = 'CRON 0 0 2 * * * TZ=UTC'
    WHERE "TASK_ID" = 'etl_extract';
    ```
 
@@ -463,9 +472,9 @@ There is no manual trigger API. To run a task immediately:
 
 ```sql
 SELECT "TASK_ID", "STATUS", "STARTED_AT", "FINISHED_AT"
-FROM PUBLIC.SCHED_HISTORY
+FROM SCHED.SCHED_HISTORY
 WHERE "GRAPH_RUN_ID" = (
-    SELECT "GRAPH_RUN_ID" FROM PUBLIC.SCHED_HISTORY
+    SELECT "GRAPH_RUN_ID" FROM SCHED.SCHED_HISTORY
     WHERE "TASK_ID"    = 'etl_extract'
       AND "STATUS"     = 'SUCCEEDED'
       AND "STARTED_AT" >= TRUNC(CURRENT_TIMESTAMP)
@@ -485,6 +494,6 @@ ORDER BY "STARTED_AT";
 | `AFTER` must match an existing `TASK_ID` or be NULL | Task becomes orphan; silently never runs |
 | Never put a cycle in `AFTER` references | All cycle participants silently excluded |
 | `SCHEDULE` must be a non-empty string (even for children) | `INSERT` fails with NOT NULL violation |
-| Never grant `INSERT`/`UPDATE` on `SCHED_TASKS` to untrusted users | `STATEMENT` is executed verbatim; it is a code execution surface |
+| Never grant `INSERT`/`UPDATE` on `SCHED_TASKS` to untrusted users | `SQL_TEXT` is executed verbatim; it is a code execution surface |
 | Child `TASK_ID` values must sort correctly if sequential order matters | Set `PARALLEL_CHILDREN = FALSE` on the parent; children then execute alphabetically |
 | A root task failure exits the scheduler process | Do not let a failing root task loop; disable it before the supervisor restarts |

@@ -2,9 +2,9 @@ mod common;
 
 use chrono::{DateTime, TimeZone, Utc};
 use common::{DbVersion, ProgrammableDb, root_task};
-use exasol_scheduler::scheduler::Scheduler;
-use exasol_scheduler::schedule::LocalTimeZone;
 use exasol_scheduler::model::{HistoryEvent, TaskRow};
+use exasol_scheduler::schedule::LocalTimeZone;
+use exasol_scheduler::scheduler::Scheduler;
 use exasol_scheduler::time::FakeClock;
 use pretty_assertions::assert_eq;
 use std::collections::HashSet;
@@ -16,7 +16,10 @@ fn dt(y: i32, m: u32, d: u32, hh: u32, mm: u32, ss: u32) -> DateTime<Utc> {
 }
 
 fn version(last_changed: DateTime<Utc>, tasks: Vec<TaskRow>) -> DbVersion {
-    DbVersion { last_changed, tasks }
+    DbVersion {
+        last_changed,
+        tasks,
+    }
 }
 
 fn make_scheduler(db: Arc<ProgrammableDb>, clock: Arc<FakeClock>) -> Scheduler {
@@ -89,9 +92,17 @@ fn history_is_written_after_failed_root_execution_and_error_propagates() {
     let e = &events[0];
     assert_eq!(e.task_id, "root_fail");
     assert_eq!(e.status, "FAILED");
-    assert!(e.error_message.as_deref().unwrap().contains("intentional failure"));
-    assert_eq!(e.db_calls_after_failure(db.write_history_calls()), (),
-               "sanity: write_history was called");
+    assert!(
+        e.error_message
+            .as_deref()
+            .unwrap()
+            .contains("intentional failure")
+    );
+    assert_eq!(
+        e.db_calls_after_failure(db.write_history_calls()),
+        (),
+        "sanity: write_history was called"
+    );
 }
 
 // helper trait extension (local to this test file)
@@ -126,7 +137,11 @@ fn write_history_failure_does_not_prevent_execution_or_crash_scheduler() {
     // tick must succeed despite write_history returning an error
     let result = scheduler.tick().unwrap();
     assert_eq!(result.executed_roots, 1);
-    assert_eq!(db.execute_calls(), 1, "statement must still have been executed");
+    assert_eq!(
+        db.execute_calls(),
+        1,
+        "statement must still have been executed"
+    );
     assert_eq!(db.write_history_calls(), 1, "write_history was attempted");
 }
 

@@ -1,7 +1,9 @@
 mod common;
 
 use chrono::{DateTime, TimeZone, Utc};
-use common::{DbVersion, ProgrammableDb, child_task, finalizer_task, root_task, sequential_root_task};
+use common::{
+    DbVersion, ProgrammableDb, child_task, finalizer_task, root_task, sequential_root_task,
+};
 use exasol_scheduler::model::TaskRow;
 use exasol_scheduler::schedule::LocalTimeZone;
 use exasol_scheduler::scheduler::{Scheduler, diff_task_rows};
@@ -15,7 +17,10 @@ fn dt(y: i32, m: u32, d: u32, hh: u32, mm: u32, ss: u32) -> DateTime<Utc> {
 }
 
 fn version(last_changed: DateTime<Utc>, tasks: Vec<TaskRow>) -> DbVersion {
-    DbVersion { last_changed, tasks }
+    DbVersion {
+        last_changed,
+        tasks,
+    }
 }
 
 fn make_scheduler(db: Arc<ProgrammableDb>, clock: Arc<FakeClock>) -> Scheduler {
@@ -45,8 +50,18 @@ fn parallel_children_run_concurrently() {
             dt(2026, 3, 1, 8, 0, 0),
             vec![
                 root_task("root", "CRON 0 * * * * * TZ=UTC", "SELECT root"),
-                child_task("child_a", "root", "CRON 0 * * * * * TZ=UTC", "SELECT child_a"),
-                child_task("child_b", "root", "CRON 0 * * * * * TZ=UTC", "SELECT child_b"),
+                child_task(
+                    "child_a",
+                    "root",
+                    "CRON 0 * * * * * TZ=UTC",
+                    "SELECT child_a",
+                ),
+                child_task(
+                    "child_b",
+                    "root",
+                    "CRON 0 * * * * * TZ=UTC",
+                    "SELECT child_b",
+                ),
             ],
         )],
         clock.clone(),
@@ -59,9 +74,20 @@ fn parallel_children_run_concurrently() {
     assert_eq!(result.failed_children, 0);
 
     let events = db.history_events();
-    let statuses: std::collections::HashMap<_, _> = events.iter().map(|e| (e.task_id.as_str(), e.status.as_str())).collect();
-    assert_eq!(statuses.get("child_a"), Some(&"SUCCEEDED"), "child_a must have SUCCEEDED");
-    assert_eq!(statuses.get("child_b"), Some(&"SUCCEEDED"), "child_b must have SUCCEEDED");
+    let statuses: std::collections::HashMap<_, _> = events
+        .iter()
+        .map(|e| (e.task_id.as_str(), e.status.as_str()))
+        .collect();
+    assert_eq!(
+        statuses.get("child_a"),
+        Some(&"SUCCEEDED"),
+        "child_a must have SUCCEEDED"
+    );
+    assert_eq!(
+        statuses.get("child_b"),
+        Some(&"SUCCEEDED"),
+        "child_b must have SUCCEEDED"
+    );
 }
 
 #[test]
@@ -74,8 +100,18 @@ fn sequential_children_run_in_order() {
             dt(2026, 3, 1, 8, 0, 0),
             vec![
                 sequential_root_task("root", "CRON 0 * * * * * TZ=UTC", "SELECT root"),
-                child_task("child_a", "root", "CRON 0 * * * * * TZ=UTC", "SELECT child_a"),
-                child_task("child_b", "root", "CRON 0 * * * * * TZ=UTC", "SELECT child_b"),
+                child_task(
+                    "child_a",
+                    "root",
+                    "CRON 0 * * * * * TZ=UTC",
+                    "SELECT child_a",
+                ),
+                child_task(
+                    "child_b",
+                    "root",
+                    "CRON 0 * * * * * TZ=UTC",
+                    "SELECT child_b",
+                ),
             ],
         )],
         clock.clone(),
@@ -87,7 +123,10 @@ fn sequential_children_run_in_order() {
     assert_eq!(result.failed_children, 0);
     let stmts: Vec<_> = db.executions().into_iter().map(|r| r.statement).collect();
     assert_eq!(stmts[0], "SELECT root");
-    assert_eq!(stmts[1], "SELECT child_a", "alpha-first child must run first in sequential mode");
+    assert_eq!(
+        stmts[1], "SELECT child_a",
+        "alpha-first child must run first in sequential mode"
+    );
     assert_eq!(stmts[2], "SELECT child_b");
 }
 
@@ -102,8 +141,18 @@ fn parallel_children_both_complete_when_one_fails() {
             dt(2026, 3, 1, 8, 0, 0),
             vec![
                 root_task("root", "CRON 0 * * * * * TZ=UTC", "SELECT root"),
-                child_task("child_a", "root", "CRON 0 * * * * * TZ=UTC", "SELECT child_a"),
-                child_task("child_b", "root", "CRON 0 * * * * * TZ=UTC", "SELECT child_b"),
+                child_task(
+                    "child_a",
+                    "root",
+                    "CRON 0 * * * * * TZ=UTC",
+                    "SELECT child_a",
+                ),
+                child_task(
+                    "child_b",
+                    "root",
+                    "CRON 0 * * * * * TZ=UTC",
+                    "SELECT child_b",
+                ),
             ],
         )],
         clock.clone(),
@@ -117,9 +166,15 @@ fn parallel_children_both_complete_when_one_fails() {
     assert_eq!(result.failed_children, 1);
 
     let events = db.history_events();
-    let statuses: std::collections::HashMap<_, _> = events.iter().map(|e| (e.task_id.as_str(), e.status.as_str())).collect();
+    let statuses: std::collections::HashMap<_, _> = events
+        .iter()
+        .map(|e| (e.task_id.as_str(), e.status.as_str()))
+        .collect();
     assert_eq!(statuses["child_a"], "FAILED");
-    assert_eq!(statuses["child_b"], "SUCCEEDED", "sibling must still complete when peer fails");
+    assert_eq!(
+        statuses["child_b"], "SUCCEEDED",
+        "sibling must still complete when peer fails"
+    );
 }
 
 #[test]
@@ -146,7 +201,10 @@ fn parallel_children_failure_count_is_sum_of_all_branches() {
     db.set_failure_for_statement("SELECT c", "c failed");
     let result = scheduler.tick().unwrap();
 
-    assert_eq!(result.failed_children, 2, "both failed children must be counted");
+    assert_eq!(
+        result.failed_children, 2,
+        "both failed children must be counted"
+    );
 }
 
 #[test]
@@ -159,7 +217,12 @@ fn parallel_grandchildren_respect_own_parent_flag() {
 
     let child_a_sequential = TaskRow {
         parallel_children: false,
-        ..child_task("child_a", "root", "CRON 0 * * * * * TZ=UTC", "SELECT child_a")
+        ..child_task(
+            "child_a",
+            "root",
+            "CRON 0 * * * * * TZ=UTC",
+            "SELECT child_a",
+        )
     };
 
     let db = Arc::new(ProgrammableDb::new(
@@ -168,9 +231,24 @@ fn parallel_grandchildren_respect_own_parent_flag() {
             vec![
                 root_task("root", "CRON 0 * * * * * TZ=UTC", "SELECT root"),
                 child_a_sequential,
-                child_task("child_b", "root", "CRON 0 * * * * * TZ=UTC", "SELECT child_b"),
-                child_task("grandchild_1", "child_a", "CRON 0 * * * * * TZ=UTC", "SELECT gc1"),
-                child_task("grandchild_2", "child_a", "CRON 0 * * * * * TZ=UTC", "SELECT gc2"),
+                child_task(
+                    "child_b",
+                    "root",
+                    "CRON 0 * * * * * TZ=UTC",
+                    "SELECT child_b",
+                ),
+                child_task(
+                    "grandchild_1",
+                    "child_a",
+                    "CRON 0 * * * * * TZ=UTC",
+                    "SELECT gc1",
+                ),
+                child_task(
+                    "grandchild_2",
+                    "child_a",
+                    "CRON 0 * * * * * TZ=UTC",
+                    "SELECT gc2",
+                ),
             ],
         )],
         clock.clone(),
@@ -182,15 +260,24 @@ fn parallel_grandchildren_respect_own_parent_flag() {
     assert_eq!(result.failed_children, 0);
     let events = db.history_events();
     let task_ids: HashSet<_> = events.iter().map(|e| e.task_id.as_str()).collect();
-    assert!(task_ids.contains("grandchild_1"), "grandchild_1 must execute");
-    assert!(task_ids.contains("grandchild_2"), "grandchild_2 must execute");
+    assert!(
+        task_ids.contains("grandchild_1"),
+        "grandchild_1 must execute"
+    );
+    assert!(
+        task_ids.contains("grandchild_2"),
+        "grandchild_2 must execute"
+    );
 
     // grandchild_1 must come before grandchild_2 in executions (sequential under child_a)
     let execs = db.executions();
     let stmts: Vec<_> = execs.iter().map(|r| r.statement.as_str()).collect();
     let gc1_pos = stmts.iter().position(|s| *s == "SELECT gc1").unwrap();
     let gc2_pos = stmts.iter().position(|s| *s == "SELECT gc2").unwrap();
-    assert!(gc1_pos < gc2_pos, "grandchildren of sequential parent must run alphabetically");
+    assert!(
+        gc1_pos < gc2_pos,
+        "grandchildren of sequential parent must run alphabetically"
+    );
 }
 
 #[test]
@@ -205,8 +292,18 @@ fn finalizers_run_after_all_parallel_children_complete() {
             dt(2026, 3, 1, 8, 0, 0),
             vec![
                 root_task("root", "CRON 0 * * * * * TZ=UTC", "SELECT root"),
-                child_task("child_a", "root", "CRON 0 * * * * * TZ=UTC", "SELECT child_a"),
-                child_task("child_b", "root", "CRON 0 * * * * * TZ=UTC", "SELECT child_b"),
+                child_task(
+                    "child_a",
+                    "root",
+                    "CRON 0 * * * * * TZ=UTC",
+                    "SELECT child_a",
+                ),
+                child_task(
+                    "child_b",
+                    "root",
+                    "CRON 0 * * * * * TZ=UTC",
+                    "SELECT child_b",
+                ),
                 finalizer_task("fin", "root", "CRON 0 * * * * * TZ=UTC", "SELECT fin"),
             ],
         )],
@@ -236,8 +333,18 @@ fn parallel_children_skipped_when_parent_fails() {
             dt(2026, 3, 1, 8, 0, 0),
             vec![
                 root_task("root", "CRON 0 * * * * * TZ=UTC", "SELECT root"),
-                child_task("child_a", "root", "CRON 0 * * * * * TZ=UTC", "SELECT child_a"),
-                child_task("child_b", "root", "CRON 0 * * * * * TZ=UTC", "SELECT child_b"),
+                child_task(
+                    "child_a",
+                    "root",
+                    "CRON 0 * * * * * TZ=UTC",
+                    "SELECT child_a",
+                ),
+                child_task(
+                    "child_b",
+                    "root",
+                    "CRON 0 * * * * * TZ=UTC",
+                    "SELECT child_b",
+                ),
             ],
         )],
         clock.clone(),
@@ -249,7 +356,10 @@ fn parallel_children_skipped_when_parent_fails() {
     let _ = scheduler.tick().unwrap_err();
 
     let events = db.history_events();
-    let statuses: std::collections::HashMap<_, _> = events.iter().map(|e| (e.task_id.as_str(), e.status.as_str())).collect();
+    let statuses: std::collections::HashMap<_, _> = events
+        .iter()
+        .map(|e| (e.task_id.as_str(), e.status.as_str()))
+        .collect();
     assert_eq!(statuses["child_a"], "SKIPPED");
     assert_eq!(statuses["child_b"], "SKIPPED");
     assert!(
@@ -261,8 +371,14 @@ fn parallel_children_skipped_when_parent_fails() {
 #[test]
 fn parallel_flag_change_triggers_snapshot_diff() {
     // Changing PARALLEL_CHILDREN TRUE→FALSE must be detected as "changed" in the diff.
-    let old = vec![TaskRow { parallel_children: true,  ..root_task("t", "CRON 0 * * * * * TZ=UTC", "SELECT 1") }];
-    let new = vec![TaskRow { parallel_children: false, ..root_task("t", "CRON 0 * * * * * TZ=UTC", "SELECT 1") }];
+    let old = vec![TaskRow {
+        parallel_children: true,
+        ..root_task("t", "CRON 0 * * * * * TZ=UTC", "SELECT 1")
+    }];
+    let new = vec![TaskRow {
+        parallel_children: false,
+        ..root_task("t", "CRON 0 * * * * * TZ=UTC", "SELECT 1")
+    }];
     let diff = diff_task_rows(&old, &new);
     assert_eq!(diff.changed, vec!["t"]);
     assert!(diff.added.is_empty() && diff.removed.is_empty());
@@ -291,7 +407,12 @@ fn parallel_children_with_disabled_sibling() {
             vec![
                 root_task("root", "CRON 0 * * * * * TZ=UTC", "SELECT root"),
                 disabled_child,
-                child_task("enabled_child", "root", "CRON 0 * * * * * TZ=UTC", "SELECT enabled"),
+                child_task(
+                    "enabled_child",
+                    "root",
+                    "CRON 0 * * * * * TZ=UTC",
+                    "SELECT enabled",
+                ),
             ],
         )],
         clock.clone(),
@@ -301,12 +422,18 @@ fn parallel_children_with_disabled_sibling() {
     scheduler.tick().unwrap();
 
     let events = db.history_events();
-    let statuses: std::collections::HashMap<_, _> = events.iter().map(|e| (e.task_id.as_str(), e.status.as_str())).collect();
+    let statuses: std::collections::HashMap<_, _> = events
+        .iter()
+        .map(|e| (e.task_id.as_str(), e.status.as_str()))
+        .collect();
     assert_eq!(statuses["enabled_child"], "SUCCEEDED");
     assert_eq!(statuses["disabled"], "SKIPPED");
 
     let disabled_ev = events.iter().find(|e| e.task_id == "disabled").unwrap();
-    assert_eq!(disabled_ev.error_message.as_deref(), Some("task is disabled"));
+    assert_eq!(
+        disabled_ev.error_message.as_deref(),
+        Some("task is disabled")
+    );
 }
 
 // ─── Call-site coverage ───────────────────────────────────────────────────────
@@ -336,8 +463,14 @@ fn root_direct_children_use_parallel_execution() {
 
     let events = db.history_events();
     let task_ids: HashSet<_> = events.iter().map(|e| e.task_id.as_str()).collect();
-    assert!(task_ids.contains("ca"), "ca must have been dispatched via run()");
-    assert!(task_ids.contains("cb"), "cb must have been dispatched via run()");
+    assert!(
+        task_ids.contains("ca"),
+        "ca must have been dispatched via run()"
+    );
+    assert!(
+        task_ids.contains("cb"),
+        "cb must have been dispatched via run()"
+    );
 }
 
 #[test]
@@ -352,8 +485,18 @@ fn finalizer_children_run_in_parallel_by_default() {
             vec![
                 root_task("root", "CRON 0 * * * * * TZ=UTC", "SELECT root"),
                 finalizer_task("fin", "root", "CRON 0 * * * * * TZ=UTC", "SELECT fin"),
-                child_task("fin_child_a", "fin", "CRON 0 * * * * * TZ=UTC", "SELECT fin_child_a"),
-                child_task("fin_child_b", "fin", "CRON 0 * * * * * TZ=UTC", "SELECT fin_child_b"),
+                child_task(
+                    "fin_child_a",
+                    "fin",
+                    "CRON 0 * * * * * TZ=UTC",
+                    "SELECT fin_child_a",
+                ),
+                child_task(
+                    "fin_child_b",
+                    "fin",
+                    "CRON 0 * * * * * TZ=UTC",
+                    "SELECT fin_child_b",
+                ),
             ],
         )],
         clock.clone(),
@@ -364,8 +507,14 @@ fn finalizer_children_run_in_parallel_by_default() {
 
     let events = db.history_events();
     let task_ids: HashSet<_> = events.iter().map(|e| e.task_id.as_str()).collect();
-    assert!(task_ids.contains("fin_child_a"), "finalizer sub-child fin_child_a must execute");
-    assert!(task_ids.contains("fin_child_b"), "finalizer sub-child fin_child_b must execute");
+    assert!(
+        task_ids.contains("fin_child_a"),
+        "finalizer sub-child fin_child_a must execute"
+    );
+    assert!(
+        task_ids.contains("fin_child_b"),
+        "finalizer sub-child fin_child_b must execute"
+    );
 }
 
 #[test]
@@ -385,8 +534,18 @@ fn finalizer_children_respect_sequential_flag() {
             vec![
                 root_task("root", "CRON 0 * * * * * TZ=UTC", "SELECT root"),
                 sequential_fin,
-                child_task("fin_child_a", "fin", "CRON 0 * * * * * TZ=UTC", "SELECT fin_child_a"),
-                child_task("fin_child_b", "fin", "CRON 0 * * * * * TZ=UTC", "SELECT fin_child_b"),
+                child_task(
+                    "fin_child_a",
+                    "fin",
+                    "CRON 0 * * * * * TZ=UTC",
+                    "SELECT fin_child_a",
+                ),
+                child_task(
+                    "fin_child_b",
+                    "fin",
+                    "CRON 0 * * * * * TZ=UTC",
+                    "SELECT fin_child_b",
+                ),
             ],
         )],
         clock.clone(),
@@ -397,9 +556,18 @@ fn finalizer_children_respect_sequential_flag() {
 
     let execs = db.executions();
     let stmts: Vec<_> = execs.iter().map(|r| r.statement.as_str()).collect();
-    let pos_a = stmts.iter().position(|s| *s == "SELECT fin_child_a").unwrap();
-    let pos_b = stmts.iter().position(|s| *s == "SELECT fin_child_b").unwrap();
-    assert!(pos_a < pos_b, "sequential finalizer children must run alphabetically: a before b");
+    let pos_a = stmts
+        .iter()
+        .position(|s| *s == "SELECT fin_child_a")
+        .unwrap();
+    let pos_b = stmts
+        .iter()
+        .position(|s| *s == "SELECT fin_child_b")
+        .unwrap();
+    assert!(
+        pos_a < pos_b,
+        "sequential finalizer children must run alphabetically: a before b"
+    );
 }
 
 // ─── History event correctness under parallel execution ───────────────────────
@@ -432,7 +600,8 @@ fn parallel_children_share_graph_run_id() {
         assert_eq!(
             ev.graph_run_id,
             Some(root_gid),
-            "task {} has wrong graph_run_id", ev.task_id
+            "task {} has wrong graph_run_id",
+            ev.task_id
         );
     }
 }
@@ -465,7 +634,8 @@ fn parallel_skipped_children_have_no_error_message() {
         assert_eq!(ev.status, "SKIPPED");
         assert!(
             ev.error_message.is_none(),
-            "cascade-skipped task {} must have no error_message", ev.task_id
+            "cascade-skipped task {} must have no error_message",
+            ev.task_id
         );
     }
 }

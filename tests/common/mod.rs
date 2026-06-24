@@ -87,15 +87,24 @@ impl ProgrammableDb {
     }
 
     pub fn history_events(&self) -> Vec<HistoryEvent> {
-        self.history_events.lock().expect("history_events poisoned").clone()
+        self.history_events
+            .lock()
+            .expect("history_events poisoned")
+            .clone()
     }
 
     pub fn set_write_history_error(&self, message: &str) {
-        *self.write_history_error.lock().expect("write_history_error poisoned") = Some(message.to_string());
+        *self
+            .write_history_error
+            .lock()
+            .expect("write_history_error poisoned") = Some(message.to_string());
     }
 
     pub fn clear_write_history_error(&self) {
-        *self.write_history_error.lock().expect("write_history_error poisoned") = None;
+        *self
+            .write_history_error
+            .lock()
+            .expect("write_history_error poisoned") = None;
     }
 
     pub fn get_last_changed_calls(&self) -> usize {
@@ -218,7 +227,12 @@ pub fn child_task(task_id: &str, parent: &str, schedule: &str, statement: &str) 
     }
 }
 
-pub fn disabled_child_task(task_id: &str, parent: &str, schedule: &str, statement: &str) -> TaskRow {
+pub fn disabled_child_task(
+    task_id: &str,
+    parent: &str,
+    schedule: &str,
+    statement: &str,
+) -> TaskRow {
     TaskRow {
         task_id: task_id.to_string(),
         enabled: false,
@@ -255,7 +269,10 @@ mod programmable_db_tests {
     fn programmable_db_concurrent_reads_during_parallel_execution() {
         let clock = Arc::new(FakeClock::new(Utc::now()));
         let db = Arc::new(ProgrammableDb::new(
-            vec![DbVersion { last_changed: Utc::now(), tasks: vec![] }],
+            vec![DbVersion {
+                last_changed: Utc::now(),
+                tasks: vec![],
+            }],
             Arc::clone(&clock),
         ));
         db.set_failure_for_statement("FAIL", "injected failure");
@@ -271,7 +288,11 @@ mod programmable_db_tests {
         });
 
         assert_eq!(db.execute_calls(), 8, "all 8 calls must be recorded");
-        let ok_count = db.executions().iter().filter(|e| e.statement == "OK").count();
+        let ok_count = db
+            .executions()
+            .iter()
+            .filter(|e| e.statement == "OK")
+            .count();
         assert_eq!(ok_count, 4, "4 OK calls must have been recorded");
     }
 }

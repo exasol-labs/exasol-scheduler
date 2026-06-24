@@ -1,7 +1,9 @@
 mod common;
 
 use chrono::{DateTime, TimeZone, Utc};
-use common::{DbVersion, ProgrammableDb, child_task, disabled_child_task, finalizer_task, root_task};
+use common::{
+    DbVersion, ProgrammableDb, child_task, disabled_child_task, finalizer_task, root_task,
+};
 use exasol_scheduler::model::TaskRow;
 use exasol_scheduler::schedule::LocalTimeZone;
 use exasol_scheduler::scheduler::Scheduler;
@@ -15,7 +17,10 @@ fn dt(y: i32, m: u32, d: u32, hh: u32, mm: u32, ss: u32) -> DateTime<Utc> {
 }
 
 fn version(last_changed: DateTime<Utc>, tasks: Vec<exasol_scheduler::model::TaskRow>) -> DbVersion {
-    DbVersion { last_changed, tasks }
+    DbVersion {
+        last_changed,
+        tasks,
+    }
 }
 
 fn make_scheduler(db: Arc<ProgrammableDb>, clock: Arc<FakeClock>) -> Scheduler {
@@ -44,8 +49,18 @@ fn root_with_two_children_and_finalizer_executes_in_order() {
             dt(2026, 2, 1, 12, 0, 0),
             vec![
                 root_task("root", "CRON 0 * * * * * TZ=UTC", "SELECT root"),
-                child_task("child_a", "root", "CRON 0 * * * * * TZ=UTC", "SELECT child_a"),
-                child_task("child_b", "root", "CRON 0 * * * * * TZ=UTC", "SELECT child_b"),
+                child_task(
+                    "child_a",
+                    "root",
+                    "CRON 0 * * * * * TZ=UTC",
+                    "SELECT child_a",
+                ),
+                child_task(
+                    "child_b",
+                    "root",
+                    "CRON 0 * * * * * TZ=UTC",
+                    "SELECT child_b",
+                ),
                 finalizer_task("fin", "root", "CRON 0 * * * * * TZ=UTC", "SELECT fin"),
             ],
         )],
@@ -68,7 +83,10 @@ fn root_with_two_children_and_finalizer_executes_in_order() {
     let events = db.history_events();
     assert_eq!(events.len(), 4);
     for e in &events {
-        assert!(e.graph_run_id.is_some(), "all events must have graph_run_id");
+        assert!(
+            e.graph_run_id.is_some(),
+            "all events must have graph_run_id"
+        );
         assert_eq!(e.graph_run_id, events[0].graph_run_id, "same graph_run_id");
     }
 }
@@ -125,9 +143,18 @@ fn root_history_event_has_scheduled_for_children_do_not() {
     let child_event = events.iter().find(|e| e.task_id == "child").unwrap();
     let fin_event = events.iter().find(|e| e.task_id == "fin").unwrap();
 
-    assert!(root_event.scheduled_for.is_some(), "root must have scheduled_for");
-    assert!(child_event.scheduled_for.is_none(), "child must not have scheduled_for");
-    assert!(fin_event.scheduled_for.is_none(), "finalizer must not have scheduled_for");
+    assert!(
+        root_event.scheduled_for.is_some(),
+        "root must have scheduled_for"
+    );
+    assert!(
+        child_event.scheduled_for.is_none(),
+        "child must not have scheduled_for"
+    );
+    assert!(
+        fin_event.scheduled_for.is_none(),
+        "finalizer must not have scheduled_for"
+    );
 }
 
 // --- root failure skips children but finalizer still runs ---
@@ -184,7 +211,12 @@ fn child_failure_skips_grandchildren_but_finalizer_still_runs() {
             vec![
                 root_task("root", "CRON 0 * * * * * TZ=UTC", "SELECT root"),
                 child_task("child", "root", "CRON 0 * * * * * TZ=UTC", "SELECT child"),
-                child_task("grandchild", "child", "CRON 0 * * * * * TZ=UTC", "SELECT grandchild"),
+                child_task(
+                    "grandchild",
+                    "child",
+                    "CRON 0 * * * * * TZ=UTC",
+                    "SELECT grandchild",
+                ),
                 finalizer_task("fin", "root", "CRON 0 * * * * * TZ=UTC", "SELECT fin"),
             ],
         )],
@@ -265,7 +297,12 @@ fn multi_level_dag_executes_full_depth_first_chain() {
             vec![
                 root_task("root", "CRON 0 * * * * * TZ=UTC", "SELECT root"),
                 child_task("child", "root", "CRON 0 * * * * * TZ=UTC", "SELECT child"),
-                child_task("grandchild", "child", "CRON 0 * * * * * TZ=UTC", "SELECT grandchild"),
+                child_task(
+                    "grandchild",
+                    "child",
+                    "CRON 0 * * * * * TZ=UTC",
+                    "SELECT grandchild",
+                ),
             ],
         )],
         clock.clone(),
@@ -278,7 +315,10 @@ fn multi_level_dag_executes_full_depth_first_chain() {
     assert_eq!(result.failed_children, 0);
 
     let execs: Vec<_> = db.executions().into_iter().map(|r| r.statement).collect();
-    assert_eq!(execs, vec!["SELECT root", "SELECT child", "SELECT grandchild"]);
+    assert_eq!(
+        execs,
+        vec!["SELECT root", "SELECT child", "SELECT grandchild"]
+    );
 }
 
 // --- orphan task is never executed ---
@@ -293,7 +333,12 @@ fn dag_orphan_task_is_never_executed() {
             vec![
                 root_task("root", "CRON 0 * * * * * TZ=UTC", "SELECT root"),
                 // orphan: AFTER points to a task not in the snapshot
-                child_task("orphan", "nonexistent", "CRON 0 * * * * * TZ=UTC", "SELECT orphan"),
+                child_task(
+                    "orphan",
+                    "nonexistent",
+                    "CRON 0 * * * * * TZ=UTC",
+                    "SELECT orphan",
+                ),
             ],
         )],
         clock.clone(),
@@ -370,7 +415,12 @@ fn snapshot_reload_rebuilds_dag_indexes_mid_scenario() {
     clock.advance(Duration::from_secs(60)); // reach next minute (12:01:00 + 60s = 12:02:00)
     let result2 = scheduler.tick().unwrap();
     assert_eq!(result2.executed_roots, 1);
-    let execs: Vec<_> = db.executions().into_iter().skip(1).map(|r| r.statement).collect();
+    let execs: Vec<_> = db
+        .executions()
+        .into_iter()
+        .skip(1)
+        .map(|r| r.statement)
+        .collect();
     assert_eq!(execs, vec!["SELECT root", "SELECT child"]);
 }
 
@@ -385,8 +435,18 @@ fn failed_children_count_is_reported_in_tick_result() {
             dt(2026, 2, 1, 12, 0, 0),
             vec![
                 root_task("root", "CRON 0 * * * * * TZ=UTC", "SELECT root"),
-                child_task("child_a", "root", "CRON 0 * * * * * TZ=UTC", "SELECT child_a"),
-                child_task("child_b", "root", "CRON 0 * * * * * TZ=UTC", "SELECT child_b"),
+                child_task(
+                    "child_a",
+                    "root",
+                    "CRON 0 * * * * * TZ=UTC",
+                    "SELECT child_a",
+                ),
+                child_task(
+                    "child_b",
+                    "root",
+                    "CRON 0 * * * * * TZ=UTC",
+                    "SELECT child_b",
+                ),
                 finalizer_task("fin", "root", "CRON 0 * * * * * TZ=UTC", "SELECT fin"),
             ],
         )],
@@ -441,8 +501,18 @@ fn finalizer_runs_after_all_children_on_root_success() {
             dt(2026, 2, 1, 12, 0, 0),
             vec![
                 root_task("root", "CRON 0 * * * * * TZ=UTC", "SELECT root"),
-                child_task("child_a", "root", "CRON 0 * * * * * TZ=UTC", "SELECT child_a"),
-                child_task("child_b", "root", "CRON 0 * * * * * TZ=UTC", "SELECT child_b"),
+                child_task(
+                    "child_a",
+                    "root",
+                    "CRON 0 * * * * * TZ=UTC",
+                    "SELECT child_a",
+                ),
+                child_task(
+                    "child_b",
+                    "root",
+                    "CRON 0 * * * * * TZ=UTC",
+                    "SELECT child_b",
+                ),
                 finalizer_task("fin", "root", "CRON 0 * * * * * TZ=UTC", "SELECT fin"),
             ],
         )],
@@ -493,8 +563,18 @@ fn disabled_child_is_skipped_not_executed_when_parent_succeeds() {
             dt(2026, 2, 1, 12, 0, 0),
             vec![
                 root_task("root", "CRON 0 * * * * * TZ=UTC", "SELECT root"),
-                disabled_child_task("disabled_child", "root", "CRON 0 * * * * * TZ=UTC", "SELECT disabled"),
-                child_task("enabled_child", "root", "CRON 0 * * * * * TZ=UTC", "SELECT enabled"),
+                disabled_child_task(
+                    "disabled_child",
+                    "root",
+                    "CRON 0 * * * * * TZ=UTC",
+                    "SELECT disabled",
+                ),
+                child_task(
+                    "enabled_child",
+                    "root",
+                    "CRON 0 * * * * * TZ=UTC",
+                    "SELECT enabled",
+                ),
             ],
         )],
         clock.clone(),
@@ -507,13 +587,22 @@ fn disabled_child_is_skipped_not_executed_when_parent_succeeds() {
 
     // disabled_child must not have been executed
     let execs: Vec<_> = db.executions().into_iter().map(|r| r.statement).collect();
-    assert!(!execs.contains(&"SELECT disabled".to_string()), "disabled child must not execute");
-    assert!(execs.contains(&"SELECT enabled".to_string()), "enabled child must execute");
+    assert!(
+        !execs.contains(&"SELECT disabled".to_string()),
+        "disabled child must not execute"
+    );
+    assert!(
+        execs.contains(&"SELECT enabled".to_string()),
+        "enabled child must execute"
+    );
 
     // disabled_child must have a SKIPPED history entry
     let events = db.history_events();
     let skipped = events.iter().find(|e| e.task_id == "disabled_child");
-    assert!(skipped.is_some(), "disabled child must have a history entry");
+    assert!(
+        skipped.is_some(),
+        "disabled child must have a history entry"
+    );
     assert_eq!(skipped.unwrap().status, "SKIPPED");
 }
 
@@ -538,7 +627,12 @@ fn disabled_finalizer_is_skipped_not_executed() {
             dt(2026, 2, 1, 12, 0, 0),
             vec![
                 root_task("root", "CRON 0 * * * * * TZ=UTC", "SELECT root"),
-                finalizer_task("enabled_fin", "root", "CRON 0 * * * * * TZ=UTC", "SELECT enabled_fin"),
+                finalizer_task(
+                    "enabled_fin",
+                    "root",
+                    "CRON 0 * * * * * TZ=UTC",
+                    "SELECT enabled_fin",
+                ),
                 disabled_fin,
             ],
         )],
@@ -549,12 +643,21 @@ fn disabled_finalizer_is_skipped_not_executed() {
     scheduler.tick().unwrap();
 
     let execs: Vec<_> = db.executions().into_iter().map(|r| r.statement).collect();
-    assert!(!execs.contains(&"SELECT disabled_fin".to_string()), "disabled finalizer must not execute");
-    assert!(execs.contains(&"SELECT enabled_fin".to_string()), "enabled finalizer must execute");
+    assert!(
+        !execs.contains(&"SELECT disabled_fin".to_string()),
+        "disabled finalizer must not execute"
+    );
+    assert!(
+        execs.contains(&"SELECT enabled_fin".to_string()),
+        "enabled finalizer must execute"
+    );
 
     let events = db.history_events();
     let skipped = events.iter().find(|e| e.task_id == "disabled_fin");
-    assert!(skipped.is_some(), "disabled finalizer must have a history entry");
+    assert!(
+        skipped.is_some(),
+        "disabled finalizer must have a history entry"
+    );
     assert_eq!(skipped.unwrap().status, "SKIPPED");
 }
 
@@ -573,7 +676,12 @@ fn finalizer_executes_its_own_sub_children() {
             vec![
                 root_task("root", "CRON 0 * * * * * TZ=UTC", "SELECT root"),
                 finalizer_task("fin", "root", "CRON 0 * * * * * TZ=UTC", "SELECT fin"),
-                child_task("sub_child", "fin", "CRON 0 * * * * * TZ=UTC", "SELECT sub_child"),
+                child_task(
+                    "sub_child",
+                    "fin",
+                    "CRON 0 * * * * * TZ=UTC",
+                    "SELECT sub_child",
+                ),
             ],
         )],
         clock.clone(),
@@ -584,10 +692,16 @@ fn finalizer_executes_its_own_sub_children() {
 
     let events = db.history_events();
     let sub_child_ev = events.iter().find(|e| e.task_id == "sub_child");
-    assert!(sub_child_ev.is_some(), "sub_child of a finalizer must appear in history");
+    assert!(
+        sub_child_ev.is_some(),
+        "sub_child of a finalizer must appear in history"
+    );
     assert_eq!(sub_child_ev.unwrap().status, "SUCCEEDED");
-    assert_eq!(sub_child_ev.unwrap().graph_phase, "MAIN",
-        "children of finalizers execute as MAIN, not FINAL");
+    assert_eq!(
+        sub_child_ev.unwrap().graph_phase,
+        "MAIN",
+        "children of finalizers execute as MAIN, not FINAL"
+    );
 }
 
 // --- Gap: SKIPPED-due-to-parent has error_message = None ---
@@ -636,7 +750,12 @@ fn disabled_child_skipped_with_task_is_disabled_message() {
             dt(2026, 2, 1, 12, 0, 0),
             vec![
                 root_task("root", "CRON 0 * * * * * TZ=UTC", "SELECT root"),
-                disabled_child_task("disabled_child", "root", "CRON 0 * * * * * TZ=UTC", "SELECT disabled"),
+                disabled_child_task(
+                    "disabled_child",
+                    "root",
+                    "CRON 0 * * * * * TZ=UTC",
+                    "SELECT disabled",
+                ),
             ],
         )],
         clock.clone(),
@@ -646,7 +765,10 @@ fn disabled_child_skipped_with_task_is_disabled_message() {
     scheduler.tick().unwrap();
 
     let events = db.history_events();
-    let child_ev = events.iter().find(|e| e.task_id == "disabled_child").unwrap();
+    let child_ev = events
+        .iter()
+        .find(|e| e.task_id == "disabled_child")
+        .unwrap();
     assert_eq!(child_ev.status, "SKIPPED");
     assert_eq!(
         child_ev.error_message.as_deref(),
@@ -681,7 +803,10 @@ fn finalizer_of_failed_root_runs_and_is_not_skipped() {
 
     let events = db.history_events();
     let fin_ev = events.iter().find(|e| e.task_id == "fin").unwrap();
-    assert_eq!(fin_ev.status, "SUCCEEDED",
-        "finalizer must run (SUCCEEDED) even when root failed; got: {}", fin_ev.status);
+    assert_eq!(
+        fin_ev.status, "SUCCEEDED",
+        "finalizer must run (SUCCEEDED) even when root failed; got: {}",
+        fin_ev.status
+    );
     assert_eq!(fin_ev.graph_phase, "FINAL");
 }

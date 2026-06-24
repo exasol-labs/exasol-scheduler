@@ -197,8 +197,30 @@ fn statement_change_does_not_modify_schedule_fingerprint() {
 
 #[test]
 fn parallel_children_change_is_detected_as_changed() {
-    let old = vec![TaskRow { parallel_children: true,  ..task("t", true, "CRON 0 * * * * * TZ=UTC", "SELECT 1", None, false, None) }];
-    let new = vec![TaskRow { parallel_children: false, ..task("t", true, "CRON 0 * * * * * TZ=UTC", "SELECT 1", None, false, None) }];
+    let old = vec![TaskRow {
+        parallel_children: true,
+        ..task(
+            "t",
+            true,
+            "CRON 0 * * * * * TZ=UTC",
+            "SELECT 1",
+            None,
+            false,
+            None,
+        )
+    }];
+    let new = vec![TaskRow {
+        parallel_children: false,
+        ..task(
+            "t",
+            true,
+            "CRON 0 * * * * * TZ=UTC",
+            "SELECT 1",
+            None,
+            false,
+            None,
+        )
+    }];
     let diff = diff_task_rows(&old, &new);
     assert_eq!(diff.changed, vec!["t"]);
     assert!(diff.added.is_empty() && diff.removed.is_empty());
@@ -208,12 +230,38 @@ fn parallel_children_change_is_detected_as_changed() {
 fn parallel_children_change_does_not_affect_schedule_fingerprint() {
     // Changing parallel_children must NOT trigger rescheduling — the root's next-due
     // time should be undisturbed. Only full_fingerprint (snapshot diff) must differ.
-    let parallel   = TaskRow { parallel_children: true,  ..task("t", true, "CRON 0 * * * * * TZ=UTC", "SELECT 1", None, false, None) };
-    let sequential = TaskRow { parallel_children: false, ..task("t", true, "CRON 0 * * * * * TZ=UTC", "SELECT 1", None, false, None) };
+    let parallel = TaskRow {
+        parallel_children: true,
+        ..task(
+            "t",
+            true,
+            "CRON 0 * * * * * TZ=UTC",
+            "SELECT 1",
+            None,
+            false,
+            None,
+        )
+    };
+    let sequential = TaskRow {
+        parallel_children: false,
+        ..task(
+            "t",
+            true,
+            "CRON 0 * * * * * TZ=UTC",
+            "SELECT 1",
+            None,
+            false,
+            None,
+        )
+    };
     let fp_p = fingerprints_for_row(&parallel);
     let fp_s = fingerprints_for_row(&sequential);
-    assert_ne!(fp_p.full_fingerprint, fp_s.full_fingerprint,
-        "full_fingerprint must differ so snapshot diff detects the change");
-    assert_eq!(fp_p.schedule_fingerprint, fp_s.schedule_fingerprint,
-        "schedule_fingerprint must be identical so no reschedule is triggered");
+    assert_ne!(
+        fp_p.full_fingerprint, fp_s.full_fingerprint,
+        "full_fingerprint must differ so snapshot diff detects the change"
+    );
+    assert_eq!(
+        fp_p.schedule_fingerprint, fp_s.schedule_fingerprint,
+        "schedule_fingerprint must be identical so no reschedule is triggered"
+    );
 }
