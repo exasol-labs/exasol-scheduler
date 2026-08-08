@@ -83,6 +83,13 @@ The scheduler detects `SCHED_TASKS` changes within `POLL_INTERVAL_SECS` (default
 by polling `SYS.EXA_ALL_OBJECTS`. **No scheduler restart is needed after any SQL change
 to `SCHED_TASKS`.** Changes propagate automatically.
 
+"No restart required" does not mean that separately committed changes to multiple rows
+are reloaded atomically. Each poll reloads the committed table state visible at that
+time, so a deployment made as several independent commits can be split across multiple
+polls and expose a temporarily incomplete task graph. Where the SQL client supports
+transactions, issue all related `INSERT`, `UPDATE`, and `DELETE` statements in one
+transaction and commit once.
+
 ### Missed executions
 
 When the scheduler restarts, it computes the next fire time from the current wall clock.

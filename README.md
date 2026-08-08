@@ -174,6 +174,12 @@ DELETE FROM SCHED.SCHED_TASKS WHERE "TASK_ID" = 'obsolete_job';
 
 The scheduler picks up every change on its next poll — no restart required.
 
+Hot reload does not make a sequence of separately committed statements atomic. If a
+multi-row task graph is deployed with one commit per `INSERT`, the scheduler (and other
+readers of `SCHED_TASKS`) can observe and reload an intermediate set of rows between
+commits. Where the SQL client supports transactions, deploy all related task changes in
+one transaction and commit once so the complete graph becomes visible together.
+
 ---
 
 ## Execution history
