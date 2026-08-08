@@ -194,6 +194,11 @@ one transaction and commit once so the complete graph becomes visible together.
 
 Every execution writes a row to `SCHED_HISTORY`. `STATUS` is `SUCCEEDED`, `FAILED`, or `SKIPPED`. All tasks in the same graph run share a `GRAPH_RUN_ID`.
 
+`SCHED_HISTORY` records attempted graph runs, not scheduler uptime. A trigger missed while
+the scheduler process is down leaves no row at all—not even `SKIPPED`—and is not replayed
+after restart. Retain and alert on the scheduler's stdout/stderr and process-supervisor
+events; history queries alone cannot distinguish downtime from a task that was not due.
+
 ```sql
 -- All steps in the most recent run of a pipeline
 SELECT "TASK_ID", "GRAPH_PHASE", "STATUS", "ERROR_MESSAGE", "STARTED_AT"

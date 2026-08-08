@@ -95,7 +95,10 @@ transaction and commit once.
 ### Missed executions
 
 When the scheduler restarts, it computes the next fire time from the current wall clock.
-Executions missed during downtime are **never replayed**.
+Executions missed during downtime are **never replayed**. Because no execution was
+attempted, they write no `SCHED_HISTORY` row—not even a `SKIPPED` row. History alone
+therefore cannot distinguish a missed occurrence from one that was never due; retain the
+scheduler's stdout/stderr and process-supervisor events for uptime diagnosis.
 
 ### Maximum depth
 
@@ -266,12 +269,17 @@ row is written for a task that failed to schedule.
 
 ### Check scheduler liveness
 
-The scheduler writes to `SCHED_HISTORY` on every successful execution. If no rows appear
-within `2 × POLL_INTERVAL_SECS` of an expected fire time, the process may have crashed.
+The scheduler writes to `SCHED_HISTORY` for every attempted execution. If no row appears
+within `2 × POLL_INTERVAL_SECS` after an expected fire time, the process may have
+crashed. This check is meaningful only for a specific task expected to fire (or a
+dedicated heartbeat task); a table-wide activity gap is not proof of downtime when no
+task was due. Process-supervisor health and restart events are the primary liveness
+signal.
 
 ```sql
 SELECT MAX("STARTED_AT") AS "LAST_ACTIVITY"
-FROM SCHED.SCHED_HISTORY;
+FROM SCHED.SCHED_HISTORY
+WHERE "TASK_ID" = 'EXPECTED_OR_HEARTBEAT_TASK_ID';
 ```
 
 ### Get the latest run of a pipeline

@@ -87,6 +87,27 @@ docker run -d \
 
 ---
 
+## Monitoring liveness and missed executions
+
+`SCHED_HISTORY` is an execution log, not an uptime log. If the scheduler is down when a
+task is due, no run is attempted and no `FAILED` or `SKIPPED` row is written. On restart,
+the next occurrence is calculated from the current wall clock, so the missing occurrence
+leaves no trace in the table.
+
+Forward the scheduler's stdout/stderr and the service manager's lifecycle or restart
+events to the same monitoring and alerting system used for `SCHED_HISTORY` checks. An
+alert that the process is absent or restarting is the authoritative liveness signal and
+preserves evidence for downtime windows that the history table cannot provide.
+
+`MAX(STARTED_AT)` measures execution activity, not process health. Alert when an expected
+task has no history row within `2 × POLL_INTERVAL_SECS` after its expected fire time. For
+a continuous table-based liveness check, schedule a dedicated heartbeat root and apply
+that rule to the heartbeat's `TASK_ID`. Do not alert merely because the table-wide
+`MAX(STARTED_AT)` is older than `2 × POLL_INTERVAL_SECS`; that produces false alarms when
+no task was due.
+
+---
+
 ## Failure isolation
 
 A root-task failure is fatal to the scheduler process, but the process does not exit in
