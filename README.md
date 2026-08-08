@@ -30,14 +30,9 @@ With Exasol Scheduler, task definitions live in a standard Exasol table:
 
 ## What this is not
 
-Exasol Scheduler is a SQL scheduler, not a general-purpose workflow runner. Every
-task's `SQL_TEXT` is sent directly to Exasol over the database protocol. The scheduler
-does not invoke a shell, start local processes, or run tools such as dbt, Python, or
-command-line programs.
+Exasol Scheduler is a SQL scheduler, not a general-purpose workflow runner. Every task's `SQL_TEXT` is sent directly to Exasol over the database protocol. The scheduler does not invoke a shell, start local processes, or run tools such as dbt, Python, or command-line programs.
 
-Work that depends on external executables must be orchestrated elsewhere or
-reimplemented as Exasol SQL or stored scripts that a task can call with `EXECUTE
-SCRIPT`. See [docs/security.md](docs/security.md) for the execution and privilege model.
+Work that depends on external executables must be orchestrated elsewhere or reimplemented as Exasol SQL or stored scripts that a task can call with `EXECUTE SCRIPT`. See [docs/security.md](docs/security.md) for the execution and privilege model.
 
 ---
 
@@ -219,8 +214,10 @@ ORDER BY "STARTED_AT";
 - **Children execute in parallel by default.** All direct children of a parent task run concurrently in separate threads. Set `PARALLEL_CHILDREN = FALSE` on the parent to run its children sequentially in alphabetical `TASK_ID` order instead.
 - **A failed or skipped parent** causes all its children to be skipped (recorded in history as `SKIPPED`).
 - **Finalizers always run**, even if their parent failed. They run after all regular children complete.
-- **Root failure is fatal** — the process supervisor should restart the binary. Child and finalizer failures are non-fatal: the scheduler logs a warning and continues.
+- **Root failure is fatal after the current graph run completes** — the failed root is recorded, descendants are recorded as `SKIPPED`, and finalizers run before the error exits the scheduler process. Child and finalizer failures are non-fatal: the scheduler logs a warning and continues.
 - **Cycles and orphans are silently excluded** from execution. Tasks whose `AFTER` forms a loop, or points to a nonexistent `TASK_ID`, never execute.
+
+Root-failure isolation is process-wide: one failing root stops every unrelated pipeline served by that scheduler until its supervisor restarts it, and occurrences missed while the process is down are not replayed. If independent pipeline families need separate failure domains, run each family in its own scheduler process configured with a distinct task table. Never point multiple scheduler processes at the same task table.
 
 > **Validating schedules:** There is no built-in dry-run command. To verify a schedule fires at the expected time, insert a test task with `ENABLED = TRUE`, observe the scheduler logs and `SCHED_HISTORY`, then delete it.
 

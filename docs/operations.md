@@ -87,6 +87,23 @@ docker run -d \
 
 ---
 
+## Failure isolation
+
+A root-task failure is fatal to the scheduler process, but the process does not exit in
+the middle of that root's graph run. It first records the failed root, records downstream
+tasks as `SKIPPED`, runs `IS_FINAL` finalizers, and attempts all associated history
+writes. The root error is then returned from the polling loop and the process exits.
+
+The failure boundary is the whole process, not one pipeline. Unrelated roots assigned to
+the same process do not run while it is down, and scheduled occurrences missed before
+the supervisor restarts it are not replayed. If this blast radius is unacceptable, run
+one scheduler process per independent pipeline family and configure each process with a
+distinct `EXA_TASKS_TABLE` (and, preferably, a distinct `EXA_HISTORY_TABLE`). Do not use
+multiple processes for isolation while pointing them at the same task table; that causes
+duplicate execution.
+
+---
+
 ## Singleton operation
 
 Run exactly **one instance** of the scheduler per set of task tables. There is no distributed lock or leader election. If two instances run simultaneously against the same `SCHED_TASKS` table, both will poll for due tasks and execute them independently — resulting in duplicate `SCHED_HISTORY` rows and double execution of every task.

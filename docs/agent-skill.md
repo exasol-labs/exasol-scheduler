@@ -60,9 +60,11 @@ string or any syntactically valid cron expression.
 
 | Task type | Failure effect |
 |---|---|
-| **Root fails** | **Scheduler process exits immediately.** All other root tasks due in the same tick are dropped. Process supervisor (systemd, Docker, etc.) must restart the binary. |
+| **Root fails** | The current graph finishes bookkeeping first: the root is recorded as `FAILED`, descendants are recorded as `SKIPPED`, and `IS_FINAL` finalizers still run. The error then exits the scheduler process. All other pipelines in that process stop until a supervisor restarts it; missed occurrences are not replayed. |
 | **Child fails** | Recorded as `FAILED`. Its own children are `SKIPPED`. Its siblings continue. Finalizers still run. Non-fatal for the scheduler process. |
 | **Finalizer fails** | Recorded as `FAILED`. Sibling finalizers continue. Non-fatal. |
+
+The root-failure blast radius is the scheduler process. If independent pipeline families need failure isolation, assign each family to a separate scheduler process with a distinct task table. Never point those processes at the same `SCHED_TASKS` table, or every task can execute more than once.
 
 ### ENABLED flag
 
@@ -340,8 +342,9 @@ WHERE "TASK_ID" = 'TASK_ID';
 
 ### Scenario: root task fails
 
-**Signal**: `STATUS = 'FAILED'` for a root task in `SCHED_HISTORY`, and no subsequent
-activity in `SCHED_HISTORY` (scheduler process has exited).
+**Signal**: `STATUS = 'FAILED'` for a root task in `SCHED_HISTORY`, followed by that
+graph's downstream `SKIPPED` rows and finalizer rows, then no activity from other graphs
+(scheduler process has exited).
 
 **Protocol**:
 1. Read `ERROR_MESSAGE` from the failed row.
