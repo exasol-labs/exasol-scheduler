@@ -28,6 +28,19 @@ With Exasol Scheduler, task definitions live in a standard Exasol table:
 
 ---
 
+## What this is not
+
+Exasol Scheduler is a SQL scheduler, not a general-purpose workflow runner. Every
+task's `SQL_TEXT` is sent directly to Exasol over the database protocol. The scheduler
+does not invoke a shell, start local processes, or run tools such as dbt, Python, or
+command-line programs.
+
+Work that depends on external executables must be orchestrated elsewhere or
+reimplemented as Exasol SQL or stored scripts that a task can call with `EXECUTE
+SCRIPT`. See [docs/security.md](docs/security.md) for the execution and privilege model.
+
+---
+
 ## Building from source
 
 Requires [Rust](https://rustup.rs) 1.85 or later.
