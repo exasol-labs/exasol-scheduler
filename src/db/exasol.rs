@@ -476,30 +476,54 @@ fn decode_task_rows_from_batches(
                 })
                 .unwrap_or(true);
 
-            let after_value = optional_string(after, row_idx);
-            let schedule = match (optional_string(schedules, row_idx), after_value.as_ref()) {
-                (Some(schedule), _) => schedule,
-                (None, Some(_)) => String::new(),
-                (None, None) => {
-                    return Err(DbError::Decode {
-                        operation,
-                        message: format!(
-                            "SCHEDULE is NULL for root task at row {row_idx}; roots require a schedule"
-                        ),
-                    });
-                }
-            };
+            let decoded = (|| {
+                let task_id = required_string(task_ids, row_idx, "TASK_ID", operation)?;
+                let enabled = required_bool(enabled, row_idx, "ENABLED", operation)?;
+                let statement = required_string(statements, row_idx, "SQL_TEXT", operation)?;
+                let after = optional_string(after, row_idx);
+                let is_final = required_bool(is_final, row_idx, "IS_FINAL", operation)?;
+                let is_root = after
+                    .as_deref()
+                    .map_or(true, |parent| parent.trim().is_empty())
+                    && !is_final;
+                let schedule = match optional_string(schedules, row_idx) {
+                    Some(schedule) => schedule,
+                    None if !is_root => String::new(),
+                    None => {
+                        return Err(DbError::Decode {
+                            operation,
+                            message: format!(
+                                "SCHEDULE is NULL for root task {task_id:?} at row {row_idx}; roots require a schedule"
+                            ),
+                        });
+                    }
+                };
 
-            rows.push(TaskRow {
-                task_id: required_string(task_ids, row_idx, "TASK_ID", operation)?,
-                enabled: required_bool(enabled, row_idx, "ENABLED", operation)?,
-                schedule,
-                statement: required_string(statements, row_idx, "SQL_TEXT", operation)?,
-                after: after_value,
-                is_final: required_bool(is_final, row_idx, "IS_FINAL", operation)?,
-                comment: optional_string(comments, row_idx),
-                parallel_children,
-            });
+                Ok(TaskRow {
+                    task_id,
+                    enabled,
+                    schedule,
+                    statement,
+                    after,
+                    is_final,
+                    comment: optional_string(comments, row_idx),
+                    parallel_children,
+                })
+            })();
+
+            match decoded {
+                Ok(row) => rows.push(row),
+                Err(error) => {
+                    let task_id =
+                        optional_string(task_ids, row_idx).unwrap_or_else(|| "<NULL>".to_string());
+                    tracing::warn!(
+                        row_index = row_idx,
+                        task_id,
+                        error = %error,
+                        "skipping invalid task row"
+                    );
+                }
+            }
         }
     }
 
@@ -1399,6 +1423,48 @@ mod tests {
         let rows = decode_task_rows_from_batches("load_tasks", &[batch]).unwrap();
         assert_eq!(rows[0].after.as_deref(), Some("root"));
         assert_eq!(rows[0].schedule, "");
+    }
+
+    #[test]
+    fn decode_task_rows_skips_null_schedule_root_and_keeps_valid_rows() {
+        let batch = RecordBatch::try_from_iter(vec![
+            (
+                "TASK_ID",
+                Arc::new(StringArray::from(vec!["valid_root", "invalid_root"])) as ArrayRef,
+            ),
+            (
+                "ENABLED",
+                Arc::new(BooleanArray::from(vec![true, true])) as ArrayRef,
+            ),
+            (
+                "SCHEDULE",
+                Arc::new(StringArray::from(vec![
+                    Some("CRON 0 * * * * * TZ=UTC"),
+                    None,
+                ])) as ArrayRef,
+            ),
+            (
+                "SQL_TEXT",
+                Arc::new(StringArray::from(vec!["SELECT 1", "SELECT 2"])) as ArrayRef,
+            ),
+            (
+                "AFTER",
+                Arc::new(StringArray::from(vec![None::<&str>, None])) as ArrayRef,
+            ),
+            (
+                "IS_FINAL",
+                Arc::new(BooleanArray::from(vec![false, false])) as ArrayRef,
+            ),
+            (
+                "COMMENT",
+                Arc::new(StringArray::from(vec![None::<&str>, None])) as ArrayRef,
+            ),
+        ])
+        .unwrap();
+
+        let rows = decode_task_rows_from_batches("load_tasks", &[batch]).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].task_id, "valid_root");
     }
 
     #[test]

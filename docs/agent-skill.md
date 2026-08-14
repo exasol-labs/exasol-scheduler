@@ -260,8 +260,10 @@ There is no dry-run command. To verify a schedule before committing to productio
 2. Observe `SCHED_HISTORY` for a row with `STATUS = 'SUCCEEDED'`.
 3. Delete the test task.
 
-An unparseable schedule emits a `WARN` log and the task silently never fires. No history
-row is written for a task that failed to schedule.
+An unparseable schedule emits a `WARN` log and the task silently never fires. A root
+with `SCHEDULE = NULL` is skipped during snapshot loading with a `WARN`; other valid
+rows are still loaded and executed. No history row is written for a task that failed
+validation or scheduling.
 
 ---
 

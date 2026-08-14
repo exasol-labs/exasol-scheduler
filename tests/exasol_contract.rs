@@ -705,6 +705,20 @@ fn ensure_tables_is_idempotent_when_tables_already_exist() {
              VALUES ('child', NULL, 'SELECT 1', 'parent')"
         ),
     );
+    must_execute_update_direct(
+        &dsn,
+        &format!(
+            "INSERT INTO {schema}.SCHED_TASKS \
+             (\"TASK_ID\", \"SCHEDULE\", \"SQL_TEXT\") \
+             VALUES ('invalid_root', NULL, 'SELECT 2')"
+        ),
+    );
+
+    let loaded = db
+        .load_tasks()
+        .expect("an invalid root row must not fail the full snapshot load");
+    assert!(loaded.iter().any(|task| task.task_id == "child"));
+    assert!(!loaded.iter().any(|task| task.task_id == "invalid_root"));
 
     let second = db
         .ensure_tables()
