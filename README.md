@@ -195,7 +195,10 @@ one transaction and commit once so the complete graph becomes visible together.
 
 ## Execution history
 
-Every execution writes a row to `SCHED_HISTORY`. `STATUS` is `SUCCEEDED`, `FAILED`, or `SKIPPED`. All tasks in the same graph run share a `GRAPH_RUN_ID`.
+Every execution writes a row to `SCHED_HISTORY`. `STATUS` is `SUCCEEDED`, `FAILED`, or
+`SKIPPED`. A task row rejected while loading is recorded with `STATUS = 'INVALID'` and
+`GRAPH_PHASE = 'VALIDATION'`. All tasks in the same graph run share a `GRAPH_RUN_ID`;
+validation events have no graph run.
 
 `SCHED_HISTORY` records attempted graph runs, not scheduler uptime. A trigger missed while
 the scheduler process is down leaves no row at all—not even `SKIPPED`—and is not replayed

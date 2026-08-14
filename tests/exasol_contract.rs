@@ -720,6 +720,38 @@ fn ensure_tables_is_idempotent_when_tables_already_exist() {
     assert!(loaded.iter().any(|task| task.task_id == "child"));
     assert!(!loaded.iter().any(|task| task.task_id == "invalid_root"));
 
+    let invalid_history = db
+        .query_batches(
+            "read_invalid_task_history",
+            format!(
+                "SELECT STATUS, GRAPH_PHASE, ERROR_MESSAGE FROM {schema}.SCHED_HISTORY \
+                 WHERE TASK_ID = 'invalid_root'"
+            ),
+        )
+        .expect("invalid task history query should succeed");
+    assert_eq!(
+        invalid_history
+            .iter()
+            .map(|batch| batch.num_rows())
+            .sum::<usize>(),
+        1,
+        "rejected root must have one SQL-visible history row"
+    );
+    let invalid_batch = invalid_history
+        .iter()
+        .find(|batch| batch.num_rows() > 0)
+        .expect("invalid task history row should exist");
+    let string_value = |column: &str| {
+        invalid_batch
+            .column_by_name(column)
+            .and_then(|array| array.as_any().downcast_ref::<StringArray>())
+            .map(|array| array.value(0))
+            .unwrap_or_else(|| panic!("{column} should be a non-null string"))
+    };
+    assert_eq!(string_value("STATUS"), "INVALID");
+    assert_eq!(string_value("GRAPH_PHASE"), "VALIDATION");
+    assert!(string_value("ERROR_MESSAGE").contains("SCHEDULE is NULL for root task"));
+
     let second = db
         .ensure_tables()
         .expect("second ensure_tables should remain idempotent");

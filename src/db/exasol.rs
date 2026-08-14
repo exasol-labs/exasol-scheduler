@@ -369,7 +369,22 @@ impl SchedulerDb for ExasolDb {
         let operation = "load_tasks";
         let sql = self.load_tasks_sql();
         let batches = self.query_batches(operation, sql)?;
-        decode_task_rows_from_batches(operation, &batches)
+        let decoded = decode_task_rows_with_rejections(operation, &batches)?;
+
+        for rejection in &decoded.rejections {
+            let rejected_at = Utc::now();
+            let event = validation_history_event(rejection, rejected_at);
+            if let Err(error) = self.write_history(&event) {
+                tracing::warn!(
+                    row_index = rejection.row_index,
+                    task_id = rejection.task_id,
+                    error = %error,
+                    "failed to record invalid task row in history"
+                );
+            }
+        }
+
+        Ok(decoded.rows)
     }
 
     fn execute_statement(&self, sql: &str) -> Result<(), DbError> {
@@ -420,11 +435,32 @@ fn decode_last_changed_from_batches(
     Err(DbError::NotFound { operation })
 }
 
+#[cfg(test)]
 fn decode_task_rows_from_batches(
     operation: &'static str,
     batches: &[RecordBatch],
 ) -> Result<Vec<TaskRow>, DbError> {
+    Ok(decode_task_rows_with_rejections(operation, batches)?.rows)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct TaskRowRejection {
+    row_index: usize,
+    task_id: String,
+    error_message: String,
+}
+
+struct DecodedTaskRows {
+    rows: Vec<TaskRow>,
+    rejections: Vec<TaskRowRejection>,
+}
+
+fn decode_task_rows_with_rejections(
+    operation: &'static str,
+    batches: &[RecordBatch],
+) -> Result<DecodedTaskRows, DbError> {
     let mut rows = Vec::new();
+    let mut rejections = Vec::new();
     for batch in batches {
         let task_ids = as_string_array(
             required_column(batch, "TASK_ID", operation)?,
@@ -522,12 +558,34 @@ fn decode_task_rows_from_batches(
                         error = %error,
                         "skipping invalid task row"
                     );
+                    rejections.push(TaskRowRejection {
+                        row_index: row_idx,
+                        task_id,
+                        error_message: error.to_string(),
+                    });
                 }
             }
         }
     }
 
-    Ok(rows)
+    Ok(DecodedTaskRows { rows, rejections })
+}
+
+fn validation_history_event(
+    rejection: &TaskRowRejection,
+    rejected_at: DateTime<Utc>,
+) -> HistoryEvent {
+    HistoryEvent {
+        run_id: uuid::Uuid::new_v4(),
+        graph_run_id: None,
+        task_id: rejection.task_id.clone(),
+        graph_phase: "VALIDATION".to_string(),
+        scheduled_for: None,
+        started_at: rejected_at,
+        finished_at: Some(rejected_at),
+        status: "INVALID".to_string(),
+        error_message: Some(rejection.error_message.clone()),
+    }
 }
 
 pub fn build_tasks_last_changed_query(schema: &str, table: &str) -> String {
@@ -1462,9 +1520,34 @@ mod tests {
         ])
         .unwrap();
 
-        let rows = decode_task_rows_from_batches("load_tasks", &[batch]).unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].task_id, "valid_root");
+        let decoded = decode_task_rows_with_rejections("load_tasks", &[batch]).unwrap();
+        assert_eq!(decoded.rows.len(), 1);
+        assert_eq!(decoded.rows[0].task_id, "valid_root");
+        assert_eq!(decoded.rejections.len(), 1);
+        assert_eq!(decoded.rejections[0].row_index, 1);
+        assert_eq!(decoded.rejections[0].task_id, "invalid_root");
+        assert!(
+            decoded.rejections[0]
+                .error_message
+                .contains("SCHEDULE is NULL for root task")
+        );
+
+        let rejected_at = Utc.with_ymd_and_hms(2026, 8, 14, 12, 0, 0).unwrap();
+        let event = validation_history_event(&decoded.rejections[0], rejected_at);
+        assert_eq!(event.task_id, "invalid_root");
+        assert_eq!(event.graph_phase, "VALIDATION");
+        assert_eq!(event.status, "INVALID");
+        assert_eq!(event.started_at, rejected_at);
+        assert_eq!(event.finished_at, Some(rejected_at));
+        assert!(event.graph_run_id.is_none());
+        assert!(event.scheduled_for.is_none());
+        assert!(
+            event
+                .error_message
+                .as_deref()
+                .unwrap()
+                .contains("SCHEDULE is NULL for root task")
+        );
     }
 
     #[test]

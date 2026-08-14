@@ -123,7 +123,11 @@ EXA_VALIDATE_SERVER_CERT=true
 
 Exasol's built-in audit log (`EXA_DBA_AUDIT_SQL`) records every SQL statement executed, including the session user. Enable it and retain logs according to your compliance requirements. This gives you a full record of what the scheduler ran, independent of the `SCHED_HISTORY` table.
 
-The `SCHED_HISTORY` table itself is an append-only audit trail of scheduler-level outcomes (`SUCCEEDED`, `FAILED`, `SKIPPED`). It records which task ran and when, but not the full SQL text. For the full SQL, join `SCHED_HISTORY` against `SCHED_TASKS` on `TASK_ID`, or consult Exasol's audit log.
+The `SCHED_HISTORY` table itself is an append-only audit trail of scheduler-level outcomes
+(`SUCCEEDED`, `FAILED`, `SKIPPED`, `INVALID`). `INVALID` records a task row rejected
+during snapshot loading. History records which task ran or was rejected and when, but
+not the full SQL text. For the full SQL, join `SCHED_HISTORY` against `SCHED_TASKS` on
+`TASK_ID`, or consult Exasol's audit log.
 
 To detect unexpected changes to the task schedule, run these two queries:
 

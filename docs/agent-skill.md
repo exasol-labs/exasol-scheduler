@@ -262,8 +262,10 @@ There is no dry-run command. To verify a schedule before committing to productio
 
 An unparseable schedule emits a `WARN` log and the task silently never fires. A root
 with `SCHEDULE = NULL` is skipped during snapshot loading with a `WARN`; other valid
-rows are still loaded and executed. No history row is written for a task that failed
-validation or scheduling.
+rows are still loaded and executed, and the rejected root is recorded in
+`SCHED_HISTORY` with `STATUS = 'INVALID'`, `GRAPH_PHASE = 'VALIDATION'`, and the
+validation error in `ERROR_MESSAGE`. Other scheduling failures, such as a malformed
+non-null cron expression, currently remain log-only.
 
 ---
 
@@ -305,6 +307,15 @@ SELECT "TASK_ID", "STATUS", "ERROR_MESSAGE", "STARTED_AT"
 FROM SCHED.SCHED_HISTORY
 WHERE "STATUS" = 'FAILED'
   AND "STARTED_AT" > ADD_SECONDS(CURRENT_TIMESTAMP, -3600)
+ORDER BY "STARTED_AT" DESC;
+```
+
+### Check for rejected task rows
+
+```sql
+SELECT "TASK_ID", "ERROR_MESSAGE", "STARTED_AT"
+FROM SCHED.SCHED_HISTORY
+WHERE "STATUS" = 'INVALID'
 ORDER BY "STARTED_AT" DESC;
 ```
 
