@@ -166,6 +166,21 @@ fn column_exists(db: &ExasolDb, schema: &str, table: &str, column: &str) -> bool
         .any(|batch| batch.num_rows() > 0)
 }
 
+fn column_is_nullable(db: &ExasolDb, schema: &str, table: &str, column: &str) -> bool {
+    let sql = format!(
+        "SELECT COLUMN_NAME FROM SYS.EXA_ALL_COLUMNS \
+         WHERE UPPER(COLUMN_SCHEMA) = UPPER('{}') \
+         AND UPPER(COLUMN_TABLE) = UPPER('{}') \
+         AND UPPER(COLUMN_NAME) = UPPER('{}') \
+         AND COLUMN_IS_NULLABLE = TRUE",
+        schema, table, column
+    );
+    db.query_batches("contract_column_is_nullable", sql)
+        .expect("column nullability query should succeed")
+        .iter()
+        .any(|batch| batch.num_rows() > 0)
+}
+
 fn count_history_rows(db: &ExasolDb, run_id: &str) -> usize {
     let sql = format!("SELECT RUN_ID FROM PUBLIC.SCHED_HISTORY WHERE RUN_ID = '{run_id}'");
     let batches = db.query_batches("count_history", sql).unwrap_or_default();
@@ -673,6 +688,30 @@ fn ensure_tables_is_idempotent_when_tables_already_exist() {
     assert!(
         !result.sql_text_column_renamed,
         "existing current-schema task table should not rename SQL_TEXT"
+    );
+    assert!(
+        result.schedule_nullable_altered,
+        "existing NOT NULL SCHEDULE column should be migrated"
+    );
+    assert!(
+        column_is_nullable(&db, &schema, "SCHED_TASKS", "SCHEDULE"),
+        "SCHEDULE must be nullable after migration"
+    );
+    must_execute_update_direct(
+        &dsn,
+        &format!(
+            "INSERT INTO {schema}.SCHED_TASKS \
+             (\"TASK_ID\", \"SCHEDULE\", \"SQL_TEXT\", \"AFTER\") \
+             VALUES ('child', NULL, 'SELECT 1', 'parent')"
+        ),
+    );
+
+    let second = db
+        .ensure_tables()
+        .expect("second ensure_tables should remain idempotent");
+    assert!(
+        !second.schedule_nullable_altered,
+        "already-nullable SCHEDULE should not be altered again"
     );
 }
 

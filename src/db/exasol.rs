@@ -234,10 +234,43 @@ impl ExasolDb {
     }
 
     fn ensure_schedule_nullable(&self, schema: &str, table: &str) -> Result<bool, DbError> {
+        if self.column_is_nullable(schema, table, "SCHEDULE")? {
+            return Ok(false);
+        }
+
         let alter_sql = build_make_schedule_nullable_sql(schema, table);
         tracing::warn!(schema, table, "making SCHEDULE nullable for child tasks");
         self.execute_schema_statement(&alter_sql)?;
+
+        if !self.column_is_nullable(schema, table, "SCHEDULE")? {
+            return Err(DbError::Config(format!(
+                "task table {schema}.{table} SCHEDULE column is still NOT NULL after migration"
+            )));
+        }
+
         Ok(true)
+    }
+
+    fn column_is_nullable(&self, schema: &str, table: &str, column: &str) -> Result<bool, DbError> {
+        let operation = "ensure_schedule_nullable";
+        let sql = build_column_nullable_query(schema, table, column);
+        let batches = self.query_batches(operation, sql)?;
+
+        for batch in &batches {
+            if batch.num_rows() == 0 {
+                continue;
+            }
+            let nullable = as_bool_array(
+                required_column(batch, "COLUMN_IS_NULLABLE", operation)?,
+                "COLUMN_IS_NULLABLE",
+                operation,
+            )?;
+            return required_bool(nullable, 0, "COLUMN_IS_NULLABLE", operation);
+        }
+
+        Err(DbError::Config(format!(
+            "task table {schema}.{table} is missing required {column} column"
+        )))
     }
 
     fn column_exists(&self, schema: &str, table: &str, column: &str) -> Result<bool, DbError> {
@@ -518,9 +551,22 @@ pub fn build_create_tasks_table_sql(schema: &str, table: &str) -> String {
 
 pub fn build_make_schedule_nullable_sql(schema: &str, table: &str) -> String {
     format!(
-        "ALTER TABLE {schema}.{table} MODIFY COLUMN \"SCHEDULE\" VARCHAR(512)",
+        "ALTER TABLE {schema}.{table} MODIFY COLUMN \"SCHEDULE\" VARCHAR(512) NULL",
         schema = quote_identifier(schema),
         table = quote_identifier(table),
+    )
+}
+
+fn build_column_nullable_query(schema: &str, table: &str, column: &str) -> String {
+    format!(
+        "SELECT COLUMN_IS_NULLABLE FROM SYS.EXA_ALL_COLUMNS \
+         WHERE UPPER(COLUMN_SCHEMA) = UPPER({schema}) \
+         AND UPPER(COLUMN_TABLE) = UPPER({table}) \
+         AND UPPER(COLUMN_NAME) = UPPER({column}) \
+         LIMIT 1",
+        schema = quote_literal(schema),
+        table = quote_literal(table),
+        column = quote_literal(column),
     )
 }
 
@@ -1233,8 +1279,17 @@ mod tests {
     fn make_schedule_nullable_sql_quotes_identifiers() {
         assert_eq!(
             build_make_schedule_nullable_sql("MY\"SCHEMA", "TASKS"),
-            "ALTER TABLE \"MY\"\"SCHEMA\".\"TASKS\" MODIFY COLUMN \"SCHEDULE\" VARCHAR(512)"
+            "ALTER TABLE \"MY\"\"SCHEMA\".\"TASKS\" MODIFY COLUMN \"SCHEDULE\" VARCHAR(512) NULL"
         );
+    }
+
+    #[test]
+    fn column_nullable_query_escapes_metadata_names() {
+        let sql = build_column_nullable_query("S'CHED", "TA'SKS", "SCHED'ULE");
+        assert!(sql.contains("SELECT COLUMN_IS_NULLABLE FROM SYS.EXA_ALL_COLUMNS"));
+        assert!(sql.contains("UPPER('S''CHED')"));
+        assert!(sql.contains("UPPER('TA''SKS')"));
+        assert!(sql.contains("UPPER('SCHED''ULE')"));
     }
 
     #[test]
