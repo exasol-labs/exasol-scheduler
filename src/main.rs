@@ -61,12 +61,14 @@ fn run(cli_dsn: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
         || init.history_table_created
         || init.sql_text_column_renamed
         || init.parallel_children_added
+        || init.schedule_nullable_altered
     {
         tracing::info!(
             tasks_table_created = init.tasks_table_created,
             history_table_created = init.history_table_created,
             sql_text_column_renamed = init.sql_text_column_renamed,
             parallel_children_added = init.parallel_children_added,
+            schedule_nullable_altered = init.schedule_nullable_altered,
             "initialized scheduler database objects"
         );
     }

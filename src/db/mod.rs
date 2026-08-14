@@ -5,7 +5,8 @@ use thiserror::Error;
 
 pub use exasol::{
     EnsureTablesResult, ExasolDb, ExasolDbConfig, build_create_history_table_sql,
-    build_create_tasks_table_sql, build_tasks_last_changed_query, build_write_history_sql,
+    build_create_tasks_table_sql, build_make_schedule_nullable_sql, build_tasks_last_changed_query,
+    build_write_history_sql,
 };
 
 use crate::model::{HistoryEvent, TaskRow};

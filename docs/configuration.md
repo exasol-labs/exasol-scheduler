@@ -87,7 +87,7 @@ The scheduler creates the schema and these tables automatically on first startup
 CREATE TABLE "SCHED"."SCHED_TASKS" (
     "TASK_ID"           VARCHAR(128) NOT NULL,
     "ENABLED"           BOOLEAN DEFAULT TRUE,
-    "SCHEDULE"          VARCHAR(512) NOT NULL,
+    "SCHEDULE"          VARCHAR(512),
     "SQL_TEXT"          VARCHAR(2000000) NOT NULL,
     "AFTER"             VARCHAR(128),
     "IS_FINAL"          BOOLEAN DEFAULT FALSE,

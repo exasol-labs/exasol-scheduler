@@ -51,10 +51,10 @@ A failing finalizer does not stop its siblings.
 
 ### SCHEDULE field for non-root tasks
 
-`SCHEDULE` is `NOT NULL` in the schema. **For children and finalizers, any value
-satisfies the constraint but the value is completely ignored at runtime** — the scheduler
-never parses the schedule of a non-root task. Convention: use the parent's schedule
-string or any syntactically valid cron expression.
+`SCHEDULE` is nullable in the schema. **Only roots need a schedule.** For children
+and finalizers, the value is completely ignored at runtime — the scheduler never
+parses the schedule of a non-root task. Use `NULL` for non-root tasks; old rows
+with a non-null value remain supported.
 
 ### Failure model — the most important section
 
@@ -156,7 +156,7 @@ INSERT INTO SCHED.SCHED_TASKS (
 VALUES (
     'CHILD_ID',
     TRUE,
-    'CRON 0 0 6 * * * TZ=UTC',   -- required but ignored; use parent schedule by convention
+    NULL,                         -- child tasks are triggered by their parent
     'EXECUTE SCRIPT MY_SCHEMA.CHILD_PROC()',
     'PARENT_TASK_ID',
     'Optional description'
@@ -172,7 +172,7 @@ INSERT INTO SCHED.SCHED_TASKS (
 VALUES (
     'FINAL_ID',
     TRUE,
-    'CRON 0 0 6 * * * TZ=UTC',   -- required but ignored
+    NULL,                         -- finalizers are triggered by their parent
     'EXECUTE SCRIPT MY_SCHEMA.CLEANUP()',
     'PARENT_TASK_ID',
     TRUE,
@@ -511,7 +511,7 @@ ORDER BY "STARTED_AT";
 | `TASK_ID` must be unique | `INSERT` fails with primary key violation |
 | `AFTER` must match an existing `TASK_ID` or be NULL | Task becomes orphan; silently never runs |
 | Never put a cycle in `AFTER` references | All cycle participants silently excluded |
-| `SCHEDULE` must be a non-empty string (even for children) | `INSERT` fails with NOT NULL violation |
+| Root `SCHEDULE` must be a non-empty string | The root never fires if its schedule is invalid |
 | Never grant `INSERT`/`UPDATE` on `SCHED_TASKS` to untrusted users | `SQL_TEXT` is executed verbatim; it is a code execution surface |
 | Child `TASK_ID` values must sort correctly if sequential order matters | Set `PARALLEL_CHILDREN = FALSE` on the parent; children then execute alphabetically |
 | A root task failure exits the scheduler process | Do not let a failing root task loop; disable it before the supervisor restarts |

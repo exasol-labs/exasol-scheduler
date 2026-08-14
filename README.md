@@ -95,7 +95,7 @@ Always double-quote scheduler column names in SQL. `SQL_TEXT` replaces the legac
 |---|---|
 | `TASK_ID` | Unique identifier. Child tasks refer to their parent by this name. |
 | `ENABLED` | Set to `FALSE` to pause without deleting. Default `TRUE`. |
-| `SCHEDULE` | When to run. See [Schedule syntax](#schedule-syntax) below. |
+| `SCHEDULE` | When a root runs. `NULL` for child and finalizer tasks. See [Schedule syntax](#schedule-syntax) below. |
 | `SQL_TEXT` | The SQL to execute — any valid Exasol SQL. |
 | `AFTER` | Parent task's `TASK_ID`. `NULL` for independently scheduled root tasks. |
 | `IS_FINAL` | When `TRUE`, this task always runs after its parent, even on failure. Default `FALSE`. |
@@ -114,6 +114,9 @@ VALUES ('load_sales', 'CRON 0 0 6 * * * TZ=Europe/Berlin', 'EXECUTE SCRIPT ETL.L
 ### Child tasks
 
 A child runs after its parent succeeds. Set `AFTER` to the parent's `TASK_ID`.
+Child tasks do not have their own schedule: the parent's schedule triggers the
+whole graph. Set `SCHEDULE` to `NULL` for children (a non-null value is accepted
+for compatibility but ignored).
 
 ```sql
 -- Step 1: root
@@ -122,11 +125,11 @@ VALUES ('extract', 'CRON 0 0 2 * * * TZ=UTC', 'EXECUTE SCRIPT ETL.EXTRACT()');
 
 -- Step 2: runs only when extract succeeds
 INSERT INTO SCHED.SCHED_TASKS ("TASK_ID", "SCHEDULE", "SQL_TEXT", "AFTER")
-VALUES ('transform', 'CRON 0 0 2 * * * TZ=UTC', 'EXECUTE SCRIPT ETL.TRANSFORM()', 'extract');
+VALUES ('transform', NULL, 'EXECUTE SCRIPT ETL.TRANSFORM()', 'extract');
 
 -- Step 3: runs only when transform succeeds
 INSERT INTO SCHED.SCHED_TASKS ("TASK_ID", "SCHEDULE", "SQL_TEXT", "AFTER")
-VALUES ('load', 'CRON 0 0 2 * * * TZ=UTC', 'EXECUTE SCRIPT ETL.LOAD()', 'transform');
+VALUES ('load', NULL, 'EXECUTE SCRIPT ETL.LOAD()', 'transform');
 ```
 
 If `transform` fails, `load` is skipped and recorded as `SKIPPED` in the history table.
@@ -137,7 +140,7 @@ A finalizer has `IS_FINAL = TRUE` and always runs after its parent — even if t
 
 ```sql
 INSERT INTO SCHED.SCHED_TASKS ("TASK_ID", "SCHEDULE", "SQL_TEXT", "AFTER", "IS_FINAL")
-VALUES ('notify', 'CRON 0 0 2 * * * TZ=UTC', 'EXECUTE SCRIPT ETL.SEND_STATUS()', 'extract', TRUE);
+VALUES ('notify', NULL, 'EXECUTE SCRIPT ETL.SEND_STATUS()', 'extract', TRUE);
 ```
 
 A parent can have multiple children and multiple finalizers. Children run first (alphabetical by `TASK_ID`), then finalizers run (also alphabetical). A failing finalizer does not stop its siblings.

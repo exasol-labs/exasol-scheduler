@@ -26,6 +26,7 @@ pub struct EnsureTablesResult {
     pub history_table_created: bool,
     pub sql_text_column_renamed: bool,
     pub parallel_children_added: bool,
+    pub schedule_nullable_altered: bool,
 }
 
 /// Production Exasol adapter backed by exarrow-rs.
@@ -156,6 +157,12 @@ impl ExasolDb {
             false
         };
 
+        let schedule_nullable_altered = if !tasks_table_created {
+            self.ensure_schedule_nullable(&self.config.schema, &self.config.tasks_table)?
+        } else {
+            false
+        };
+
         let history_table_created =
             if !self.table_exists(&self.config.schema, &self.config.history_table)? {
                 tracing::info!(
@@ -180,6 +187,7 @@ impl ExasolDb {
             history_table_created,
             sql_text_column_renamed,
             parallel_children_added,
+            schedule_nullable_altered,
         })
     }
 
@@ -221,6 +229,13 @@ impl ExasolDb {
              all existing parent tasks will now execute children in parallel; \
              set PARALLEL_CHILDREN=FALSE on any task that requires sequential ordering"
         );
+        self.execute_schema_statement(&alter_sql)?;
+        Ok(true)
+    }
+
+    fn ensure_schedule_nullable(&self, schema: &str, table: &str) -> Result<bool, DbError> {
+        let alter_sql = build_make_schedule_nullable_sql(schema, table);
+        tracing::warn!(schema, table, "making SCHEDULE nullable for child tasks");
         self.execute_schema_statement(&alter_sql)?;
         Ok(true)
     }
@@ -428,12 +443,26 @@ fn decode_task_rows_from_batches(
                 })
                 .unwrap_or(true);
 
+            let after_value = optional_string(after, row_idx);
+            let schedule = match (optional_string(schedules, row_idx), after_value.as_ref()) {
+                (Some(schedule), _) => schedule,
+                (None, Some(_)) => String::new(),
+                (None, None) => {
+                    return Err(DbError::Decode {
+                        operation,
+                        message: format!(
+                            "SCHEDULE is NULL for root task at row {row_idx}; roots require a schedule"
+                        ),
+                    });
+                }
+            };
+
             rows.push(TaskRow {
                 task_id: required_string(task_ids, row_idx, "TASK_ID", operation)?,
                 enabled: required_bool(enabled, row_idx, "ENABLED", operation)?,
-                schedule: required_string(schedules, row_idx, "SCHEDULE", operation)?,
+                schedule,
                 statement: required_string(statements, row_idx, "SQL_TEXT", operation)?,
-                after: optional_string(after, row_idx),
+                after: after_value,
                 is_final: required_bool(is_final, row_idx, "IS_FINAL", operation)?,
                 comment: optional_string(comments, row_idx),
                 parallel_children,
@@ -475,13 +504,21 @@ pub fn build_create_tasks_table_sql(schema: &str, table: &str) -> String {
         "CREATE TABLE {schema}.{table} (\
             \"TASK_ID\" VARCHAR(128) NOT NULL, \
             \"ENABLED\" BOOLEAN DEFAULT TRUE, \
-            \"SCHEDULE\" VARCHAR(512) NOT NULL, \
+            \"SCHEDULE\" VARCHAR(512), \
             \"SQL_TEXT\" VARCHAR(2000000) NOT NULL, \
             \"AFTER\" VARCHAR(128), \
             \"IS_FINAL\" BOOLEAN DEFAULT FALSE, \
             \"PARALLEL_CHILDREN\" BOOLEAN DEFAULT TRUE, \
             \"COMMENT\" VARCHAR(2000), \
             PRIMARY KEY (\"TASK_ID\"))",
+        schema = quote_identifier(schema),
+        table = quote_identifier(table),
+    )
+}
+
+pub fn build_make_schedule_nullable_sql(schema: &str, table: &str) -> String {
+    format!(
+        "ALTER TABLE {schema}.{table} MODIFY COLUMN \"SCHEDULE\" VARCHAR(512)",
         schema = quote_identifier(schema),
         table = quote_identifier(table),
     )
@@ -1189,6 +1226,15 @@ mod tests {
         assert!(sql.contains("\"PARALLEL_CHILDREN\""));
         assert!(sql.contains("\"COMMENT\""));
         assert!(sql.contains("PRIMARY KEY"));
+        assert!(!sql.contains("\"SCHEDULE\" VARCHAR(512) NOT NULL"));
+    }
+
+    #[test]
+    fn make_schedule_nullable_sql_quotes_identifiers() {
+        assert_eq!(
+            build_make_schedule_nullable_sql("MY\"SCHEMA", "TASKS"),
+            "ALTER TABLE \"MY\"\"SCHEMA\".\"TASKS\" MODIFY COLUMN \"SCHEDULE\" VARCHAR(512)"
+        );
     }
 
     #[test]
@@ -1255,6 +1301,49 @@ mod tests {
             alter_sql.contains("PARALLEL_CHILDREN"),
             "ALTER must name the column"
         );
+    }
+
+    #[test]
+    fn decode_task_rows_allows_null_schedule_for_child() {
+        let batch = RecordBatch::try_from_iter(vec![
+            (
+                "TASK_ID",
+                Arc::new(StringArray::from(vec!["child"])) as ArrayRef,
+            ),
+            (
+                "ENABLED",
+                Arc::new(BooleanArray::from(vec![true])) as ArrayRef,
+            ),
+            (
+                "SCHEDULE",
+                Arc::new(StringArray::from(vec![None::<&str>])) as ArrayRef,
+            ),
+            (
+                "SQL_TEXT",
+                Arc::new(StringArray::from(vec!["SELECT 1"])) as ArrayRef,
+            ),
+            (
+                "AFTER",
+                Arc::new(StringArray::from(vec![Some("root")])) as ArrayRef,
+            ),
+            (
+                "IS_FINAL",
+                Arc::new(BooleanArray::from(vec![false])) as ArrayRef,
+            ),
+            (
+                "COMMENT",
+                Arc::new(StringArray::from(vec![None::<&str>])) as ArrayRef,
+            ),
+            (
+                "PARALLEL_CHILDREN",
+                Arc::new(BooleanArray::from(vec![true])) as ArrayRef,
+            ),
+        ])
+        .unwrap();
+
+        let rows = decode_task_rows_from_batches("load_tasks", &[batch]).unwrap();
+        assert_eq!(rows[0].after.as_deref(), Some("root"));
+        assert_eq!(rows[0].schedule, "");
     }
 
     #[test]
