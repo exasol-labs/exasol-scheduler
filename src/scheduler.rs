@@ -32,6 +32,7 @@ pub struct ReloadStats {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TickResult {
     pub executed_roots: usize,
+    pub failed_roots: usize,
     pub failed_children: usize,
     pub reload: Option<ReloadStats>,
 }
@@ -97,11 +98,12 @@ impl Scheduler {
     pub fn tick(&mut self) -> Result<TickResult, SchedulerError> {
         let now = self.clock.now();
         let reload = self.reload_if_changed(now)?;
-        let (executed_roots, failed_children) = self.execute_due_roots(now)?;
+        let outcome = self.execute_due_roots(now);
 
         Ok(TickResult {
-            executed_roots,
-            failed_children,
+            executed_roots: outcome.executed_roots,
+            failed_roots: outcome.failed_roots,
+            failed_children: outcome.failed_children,
             reload,
         })
     }
@@ -136,6 +138,7 @@ impl Scheduler {
             let result = self.tick()?;
             tracing::debug!(
                 executed_roots = result.executed_roots,
+                failed_roots = result.failed_roots,
                 failed_children = result.failed_children,
                 reload = ?result.reload,
                 "tick completed"
@@ -169,9 +172,11 @@ impl Scheduler {
         Ok(Some(stats))
     }
 
-    fn execute_due_roots(&mut self, now: DateTime<Utc>) -> Result<(usize, usize), SchedulerError> {
-        let mut executed = 0usize;
-        let mut total_failed_children = 0usize;
+    /// Runs every due graph. Task failures (root, child or finalizer) are recorded in
+    /// history and logged, but never abort the polling loop: a broken task must not stop
+    /// unrelated pipelines served by the same process.
+    fn execute_due_roots(&mut self, now: DateTime<Utc>) -> DueRootsOutcome {
+        let mut outcome = DueRootsOutcome::default();
 
         while let Some(due) = self.state.pop_due_root(now, self.local_tz) {
             tracing::info!(
@@ -190,7 +195,18 @@ impl Scheduler {
                 graph_run_id,
             };
             let result = runner.run(&due);
-            total_failed_children += result.failed_children;
+            outcome.executed_roots += 1;
+            outcome.failed_children += result.failed_children;
+
+            if let Some(error) = &result.root_error {
+                outcome.failed_roots += 1;
+                tracing::warn!(
+                    task_id = due.task_id.as_str(),
+                    graph_run_id = %graph_run_id,
+                    error = error.as_str(),
+                    "root task failed; descendants skipped"
+                );
+            }
 
             if result.failed_children > 0 {
                 tracing::warn!(
@@ -200,14 +216,9 @@ impl Scheduler {
                     "graph run completed with child failures"
                 );
             }
-
-            if let Some(err) = result.root_err {
-                return Err(err);
-            }
-            executed += 1;
         }
 
-        Ok((executed, total_failed_children))
+        outcome
     }
 }
 
@@ -304,8 +315,15 @@ pub(crate) fn build_dag_indexes(
 
 // --- GraphRunner ---
 
+#[derive(Default)]
+struct DueRootsOutcome {
+    executed_roots: usize,
+    failed_roots: usize,
+    failed_children: usize,
+}
+
 struct GraphRunResult {
-    root_err: Option<SchedulerError>,
+    root_error: Option<String>,
     failed_children: usize,
 }
 
@@ -324,13 +342,9 @@ impl<'a> GraphRunner<'a> {
         let exec_result = self.db.execute_statement(&due.statement);
         let finished_at = self.clock.now();
 
-        let (status, error_message, root_err) = match exec_result {
-            Ok(_) => ("SUCCEEDED".to_string(), None, None),
-            Err(e) => {
-                let msg = e.to_string();
-                let err = SchedulerError::from(e);
-                ("FAILED".to_string(), Some(msg), Some(err))
-            }
+        let (status, error_message) = match exec_result {
+            Ok(_) => ("SUCCEEDED".to_string(), None),
+            Err(e) => ("FAILED".to_string(), Some(e.to_string())),
         };
 
         let event = HistoryEvent {
@@ -342,7 +356,7 @@ impl<'a> GraphRunner<'a> {
             started_at,
             finished_at: Some(finished_at),
             status: status.clone(),
-            error_message,
+            error_message: error_message.clone(),
         };
         if let Err(e) = self.db.write_history(&event) {
             tracing::warn!(task_id = due.task_id.as_str(), error = %e, "write_history failed");
@@ -352,7 +366,7 @@ impl<'a> GraphRunner<'a> {
         let finalizer_failures = self.execute_finalizers_of(&due.task_id, 0);
 
         GraphRunResult {
-            root_err,
+            root_error: error_message,
             failed_children: child_failures + finalizer_failures,
         }
     }

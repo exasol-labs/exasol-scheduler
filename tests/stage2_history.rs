@@ -65,10 +65,10 @@ fn history_is_written_after_successful_root_execution() {
     assert!(e.graph_run_id.is_some());
 }
 
-// --- history written on failed execution, error still propagates ---
+// --- history written on failed execution, scheduler keeps running ---
 
 #[test]
-fn history_is_written_after_failed_root_execution_and_error_propagates() {
+fn history_is_written_after_failed_root_execution_and_tick_succeeds() {
     let now = dt(2026, 2, 1, 12, 0, 59);
     let clock = Arc::new(FakeClock::new(now));
     let db = Arc::new(ProgrammableDb::new(
@@ -83,9 +83,9 @@ fn history_is_written_after_failed_root_execution_and_error_propagates() {
 
     db.set_failure_for_task_id("root_fail", "intentional failure");
     clock.advance(Duration::from_secs(1));
-    let err = scheduler.tick().unwrap_err();
-
-    assert!(err.to_string().contains("intentional failure"));
+    let tick = scheduler.tick().unwrap();
+    assert_eq!(tick.executed_roots, 1);
+    assert_eq!(tick.failed_roots, 1);
 
     let events = db.history_events();
     assert_eq!(events.len(), 1, "history must be written even on failure");
@@ -233,10 +233,10 @@ fn multiple_due_roots_each_produce_a_history_event() {
     }
 }
 
-// --- second root does not execute when first fails, first still gets history ---
+// --- a failing root does not stop other due roots (BUG-36) ---
 
 #[test]
-fn first_root_failure_stops_remaining_roots_but_history_is_written() {
+fn first_root_failure_does_not_stop_remaining_roots() {
     let now = dt(2026, 2, 1, 12, 0, 59);
     let clock = Arc::new(FakeClock::new(now));
     let db = Arc::new(ProgrammableDb::new(
@@ -255,12 +255,26 @@ fn first_root_failure_stops_remaining_roots_but_history_is_written() {
 
     db.set_failure_for_statement("SELECT A", "root_a failed");
     clock.advance(Duration::from_secs(1));
-    let err = scheduler.tick().unwrap_err();
-    assert!(err.to_string().contains("root_a failed"));
+    let tick = scheduler.tick().unwrap();
+    assert_eq!(tick.executed_roots, 2);
+    assert_eq!(tick.failed_roots, 1);
 
-    // Only one history event — the failing root. root_b was not attempted.
     let events = db.history_events();
-    assert_eq!(events.len(), 1);
-    assert_eq!(events[0].task_id, "root_a");
-    assert_eq!(events[0].status, "FAILED");
+    assert_eq!(events.len(), 2);
+    let status_of = |id: &str| {
+        events
+            .iter()
+            .find(|e| e.task_id == id)
+            .map(|e| e.status.clone())
+            .unwrap()
+    };
+    assert_eq!(status_of("root_a"), "FAILED");
+    assert_eq!(status_of("root_b"), "SUCCEEDED");
+
+    // The failed root stays scheduled and runs again on its next occurrence.
+    db.clear_failures();
+    clock.advance(Duration::from_secs(60));
+    let next = scheduler.tick().unwrap();
+    assert_eq!(next.executed_roots, 2);
+    assert_eq!(next.failed_roots, 0);
 }

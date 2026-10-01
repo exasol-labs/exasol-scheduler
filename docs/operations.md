@@ -110,18 +110,16 @@ no task was due.
 
 ## Failure isolation
 
-A root-task failure is fatal to the scheduler process, but the process does not exit in
-the middle of that root's graph run. It first records the failed root, records downstream
-tasks as `SKIPPED`, runs `IS_FINAL` finalizers, and attempts all associated history
-writes. The root error is then returned from the polling loop and the process exits.
+Task failures are contained to their graph run. A failed root is recorded as `FAILED`,
+downstream tasks are recorded as `SKIPPED`, `IS_FINAL` finalizers run, and the scheduler
+logs a warning and keeps polling. The failed root runs again at its next occurrence, and
+other roots due in the same poll still run. Child and finalizer failures behave the same
+way.
 
-The failure boundary is the whole process, not one pipeline. Unrelated roots assigned to
-the same process do not run while it is down, and scheduled occurrences missed before
-the supervisor restarts it are not replayed. If this blast radius is unacceptable, run
-one scheduler process per independent pipeline family and configure each process with a
-distinct `EXA_TASKS_TABLE` (and, preferably, a distinct `EXA_HISTORY_TABLE`). Do not use
-multiple processes for isolation while pointing them at the same task table; that causes
-duplicate execution.
+The process does exit when the scheduler cannot read its own task table (for example,
+the database is unreachable or credentials were revoked). Run it under a supervisor;
+scheduled occurrences missed before the supervisor restarts it are not replayed. Do not
+run multiple processes against the same task table; that causes duplicate execution.
 
 ---
 

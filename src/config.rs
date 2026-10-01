@@ -562,11 +562,12 @@ mod tests {
                 port: 9999,
             })
         );
-        assert_eq!(env_or_default("EXA_SCHEMA", "SCHED"), "SCHED");
         assert_eq!(bool_to_numeric(true), 1);
         assert_eq!(bool_to_numeric(false), 0);
 
+        // Env reads must hold ENV_LOCK; other tests set EXA_SCHEMA concurrently.
         with_clean_env(|| {
+            assert_eq!(env_or_default("EXA_SCHEMA", "SCHED"), "SCHED");
             assert!(!is_env_set("EXA_SCHEMA"));
             set_env("EXA_SCHEMA", "   ");
             assert!(!is_env_set("EXA_SCHEMA"));

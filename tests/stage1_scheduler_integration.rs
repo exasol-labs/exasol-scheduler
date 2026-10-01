@@ -298,8 +298,9 @@ fn execution_failure_is_returned_and_root_stays_rescheduled() {
     db.set_failure_for_task_id("root_fail", "forced failure");
     clock.advance(Duration::from_secs(1));
 
-    let err = scheduler.tick().unwrap_err();
-    assert!(err.to_string().contains("forced failure"));
+    let failed = scheduler.tick().unwrap();
+    assert_eq!(failed.executed_roots, 1);
+    assert_eq!(failed.failed_roots, 1);
     assert_eq!(db.execute_calls(), 1);
 
     let failed_root_state = scheduler.root_debug_state("root_fail").unwrap();

@@ -178,8 +178,9 @@ fn dag_root_failure_skips_children_runs_finalizer() {
     tick_past_minute(&clock, &mut scheduler);
 
     db.set_failure_for_statement("SELECT root", "root failed");
-    let err = scheduler.tick().unwrap_err();
-    assert!(err.to_string().contains("root failed"));
+    let tick = scheduler.tick().unwrap();
+    assert_eq!(tick.executed_roots, 1);
+    assert_eq!(tick.failed_roots, 1);
 
     let events = db.history_events();
     assert_eq!(events.len(), 3, "root + child (SKIPPED) + finalizer");
@@ -545,7 +546,8 @@ fn finalizer_runs_after_all_children_on_root_failure() {
     tick_past_minute(&clock, &mut scheduler);
 
     db.set_failure_for_statement("SELECT root", "root broken");
-    let _ = scheduler.tick().unwrap_err();
+    let tick = scheduler.tick().unwrap();
+    assert_eq!(tick.failed_roots, 1);
 
     let fin_event = db.history_events().into_iter().find(|e| e.task_id == "fin");
     assert!(fin_event.is_some(), "finalizer must have run");
@@ -726,7 +728,8 @@ fn child_skipped_because_parent_failed_has_no_error_message() {
     tick_past_minute(&clock, &mut scheduler);
 
     db.set_failure_for_statement("SELECT root", "root failed");
-    let _ = scheduler.tick().unwrap_err();
+    let tick = scheduler.tick().unwrap();
+    assert_eq!(tick.failed_roots, 1);
 
     let events = db.history_events();
     let child_ev = events.iter().find(|e| e.task_id == "child").unwrap();
@@ -799,7 +802,8 @@ fn finalizer_of_failed_root_runs_and_is_not_skipped() {
     tick_past_minute(&clock, &mut scheduler);
 
     db.set_failure_for_statement("SELECT root", "root failed");
-    let _ = scheduler.tick().unwrap_err();
+    let tick = scheduler.tick().unwrap();
+    assert_eq!(tick.failed_roots, 1);
 
     let events = db.history_events();
     let fin_ev = events.iter().find(|e| e.task_id == "fin").unwrap();

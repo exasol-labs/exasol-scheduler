@@ -353,7 +353,8 @@ fn parallel_children_skipped_when_parent_fails() {
     tick_past_minute(&clock, &mut scheduler);
 
     db.set_failure_for_statement("SELECT root", "root failed");
-    let _ = scheduler.tick().unwrap_err();
+    let tick = scheduler.tick().unwrap();
+    assert_eq!(tick.failed_roots, 1);
 
     let events = db.history_events();
     let statuses: std::collections::HashMap<_, _> = events
@@ -627,7 +628,8 @@ fn parallel_skipped_children_have_no_error_message() {
     tick_past_minute(&clock, &mut scheduler);
 
     db.set_failure_for_statement("SELECT root", "root failed");
-    let _ = scheduler.tick().unwrap_err();
+    let tick = scheduler.tick().unwrap();
+    assert_eq!(tick.failed_roots, 1);
 
     let events = db.history_events();
     for ev in events.iter().filter(|e| e.task_id != "root") {

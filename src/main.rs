@@ -109,6 +109,7 @@ fn run_scheduler_once(
     if tick.executed_roots > 0 {
         tracing::info!(
             executed_roots = tick.executed_roots,
+            failed_roots = tick.failed_roots,
             "executed due root tasks"
         );
     }
@@ -286,6 +287,54 @@ mod tests {
             run_scheduler_once(&mut scheduler, clock.clone()).expect("second tick should succeed");
         assert_eq!(second_delay, Duration::from_secs(60));
         assert_eq!(db.executed_sql(), vec!["SELECT 1".to_string()]);
+    }
+
+    #[derive(Debug)]
+    struct FailingStatementDb;
+
+    impl SchedulerDb for FailingStatementDb {
+        fn get_last_changed(&self) -> Result<DateTime<Utc>, DbError> {
+            Ok(dt(2026, 2, 1, 12, 0, 0))
+        }
+
+        fn load_tasks(&self) -> Result<Vec<TaskRow>, DbError> {
+            Ok(vec![root_task(
+                "solo_fail",
+                "CRON 0 * * * * * TZ=UTC",
+                "SELECT * FROM NO_SUCH_SCHEMA.NO_SUCH_TABLE",
+            )])
+        }
+
+        fn execute_statement(&self, _sql: &str) -> Result<(), DbError> {
+            Err(DbError::Other(
+                "object NO_SUCH_SCHEMA.NO_SUCH_TABLE not found".to_string(),
+            ))
+        }
+
+        fn write_history(&self, _event: &HistoryEvent) -> Result<(), DbError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn run_scheduler_once_survives_failing_task_bug_36() {
+        init_tracing();
+
+        let clock = Arc::new(FakeClock::new(dt(2026, 2, 1, 12, 0, 59)));
+        let mut scheduler = Scheduler::with_poll_interval(
+            Arc::new(FailingStatementDb),
+            clock.clone(),
+            Duration::from_secs(300),
+        );
+
+        // Load snapshot, then fire the failing task on three consecutive occurrences.
+        let mut delay = run_scheduler_once(&mut scheduler, clock.clone()).unwrap();
+        for _ in 0..3 {
+            clock.advance(delay);
+            delay = run_scheduler_once(&mut scheduler, clock.clone())
+                .expect("a failing task must not stop the scheduler loop");
+            assert_eq!(delay, Duration::from_secs(60));
+        }
     }
 
     #[test]

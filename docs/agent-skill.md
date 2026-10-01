@@ -60,11 +60,11 @@ with a non-null value remain supported.
 
 | Task type | Failure effect |
 |---|---|
-| **Root fails** | The current graph finishes bookkeeping first: the root is recorded as `FAILED`, descendants are recorded as `SKIPPED`, and `IS_FINAL` finalizers still run. The error then exits the scheduler process. All other pipelines in that process stop until a supervisor restarts it; missed occurrences are not replayed. |
+| **Root fails** | The root is recorded as `FAILED`, descendants are recorded as `SKIPPED`, and `IS_FINAL` finalizers still run. Non-fatal for the scheduler process: the root runs again at its next occurrence and other pipelines are unaffected. |
 | **Child fails** | Recorded as `FAILED`. Its own children are `SKIPPED`. Its siblings continue. Finalizers still run. Non-fatal for the scheduler process. |
 | **Finalizer fails** | Recorded as `FAILED`. Sibling finalizers continue. Non-fatal. |
 
-The root-failure blast radius is the scheduler process. If independent pipeline families need failure isolation, assign each family to a separate scheduler process with a distinct task table. Never point those processes at the same `SCHED_TASKS` table, or every task can execute more than once.
+No task failure stops the scheduler. The process only exits when it cannot read its own task table (e.g. the database is unreachable). Never run more than one scheduler process against the same `SCHED_TASKS` table, or every task can execute more than once.
 
 ### ENABLED flag
 
@@ -364,19 +364,18 @@ WHERE "TASK_ID" = 'TASK_ID';
 ### Scenario: root task fails
 
 **Signal**: `STATUS = 'FAILED'` for a root task in `SCHED_HISTORY`, followed by that
-graph's downstream `SKIPPED` rows and finalizer rows, then no activity from other graphs
-(scheduler process has exited).
+graph's downstream `SKIPPED` rows and finalizer rows. The scheduler keeps running; other
+graphs are unaffected and the root fires again at its next occurrence.
 
 **Protocol**:
 1. Read `ERROR_MESSAGE` from the failed row.
 2. Decide whether to fix the underlying issue immediately or disable the task.
-3. Disable the failing task to prevent crash-loop on restart:
+3. Optionally disable the failing task to stop repeated failures while you fix it:
    ```sql
    UPDATE SCHED.SCHED_TASKS SET "ENABLED" = FALSE WHERE "TASK_ID" = 'FAILING_ROOT';
    ```
-4. Signal the process supervisor to restart the scheduler binary.
-5. Fix the root cause (update `SQL_TEXT`, grant missing privileges, etc.).
-6. Re-enable the task:
+4. Fix the root cause (update `SQL_TEXT`, grant missing privileges, etc.).
+5. Re-enable the task:
    ```sql
    UPDATE SCHED.SCHED_TASKS SET "ENABLED" = TRUE WHERE "TASK_ID" = 'FAILING_ROOT';
    ```
@@ -527,4 +526,3 @@ ORDER BY "STARTED_AT";
 | Root `SCHEDULE` must be a non-empty string | The root never fires if its schedule is invalid |
 | Never grant `INSERT`/`UPDATE` on `SCHED_TASKS` to untrusted users | `SQL_TEXT` is executed verbatim; it is a code execution surface |
 | Child `TASK_ID` values must sort correctly if sequential order matters | Set `PARALLEL_CHILDREN = FALSE` on the parent; children then execute alphabetically |
-| A root task failure exits the scheduler process | Do not let a failing root task loop; disable it before the supervisor restarts |
