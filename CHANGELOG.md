@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.3] - 2026-10-01
+
 ### Changed
 
 - **A failing task no longer stops the scheduler process (BUG-36).** Previously, a
@@ -70,6 +72,7 @@ Initial release.
 - Agent skill documentation (`docs/agent-skill.md`) and security guidance.
 - Release builds for a target matrix of runners.
 
-[Unreleased]: https://github.com/exasol-labs/exasol-scheduler/compare/v0.2...HEAD
+[Unreleased]: https://github.com/exasol-labs/exasol-scheduler/compare/v0.3...HEAD
+[0.3]: https://github.com/exasol-labs/exasol-scheduler/compare/v0.2...v0.3
 [0.2]: https://github.com/exasol-labs/exasol-scheduler/compare/v0.1.0...v0.2
 [0.1.0]: https://github.com/exasol-labs/exasol-scheduler/releases/tag/v0.1.0
