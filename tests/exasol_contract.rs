@@ -544,11 +544,14 @@ fn contract_dag_root_with_child_writes_two_history_rows() {
     for batch in &batches {
         if batch.num_rows() > 0 {
             if let Some(col) = batch.column_by_name("CNT") {
-                use arrow::array::Int64Array;
-                if let Some(arr) = col.as_any().downcast_ref::<Int64Array>() {
-                    assert!(arr.value(0) >= 2, "expected at least 2 history rows");
-                    found = true;
-                }
+                // Exasol returns COUNT(*) as DECIMAL(18,0), which arrives as Decimal128.
+                use arrow::array::Decimal128Array;
+                let arr = col
+                    .as_any()
+                    .downcast_ref::<Decimal128Array>()
+                    .unwrap_or_else(|| panic!("CNT has unexpected type {:?}", col.data_type()));
+                assert!(arr.value(0) >= 2, "expected at least 2 history rows");
+                found = true;
             }
         }
     }
@@ -626,6 +629,129 @@ fn ensure_tables_creates_tables_when_they_do_not_exist() {
         table_exists(&db, &schema, "SCHED_HISTORY"),
         "SCHED_HISTORY should exist after ensure_tables"
     );
+}
+
+struct UserDropGuard {
+    dsn: String,
+    user: String,
+}
+
+impl Drop for UserDropGuard {
+    fn drop(&mut self) {
+        // CASCADE also drops the schema the user owns.
+        let _ = execute_update_direct(&self.dsn, &format!("DROP USER {} CASCADE", self.user));
+    }
+}
+
+/// Replaces the credentials in an `exasol://user:password@host...` DSN.
+fn dsn_with_credentials(dsn: &str, user: &str, password: &str) -> String {
+    let (scheme, rest) = dsn.split_once("://").expect("DSN must contain ://");
+    let (_, host) = rest.rsplit_once('@').expect("DSN must contain credentials");
+    format!("{scheme}://{user}:{password}@{host}")
+}
+
+#[test]
+fn ensure_tables_restarts_without_create_schema_privilege_bug_40() {
+    if skip_unless_enabled() {
+        return;
+    }
+
+    // Mirrors the starter-kit setup: a service user bootstraps its own schema, then
+    // CREATE SCHEMA / CREATE TABLE are revoked. Every later start must still succeed.
+    let admin_dsn = nano_dsn();
+    let user = contract_schema_name("CODEX_SVC");
+    let schema = contract_schema_name("CODEX_LEASTPRIV");
+    let password = "Svc_Pw_12345";
+    let _guard = UserDropGuard {
+        dsn: admin_dsn.clone(),
+        user: user.clone(),
+    };
+    must_execute_update_direct(
+        &admin_dsn,
+        &format!("CREATE USER {user} IDENTIFIED BY \"{password}\""),
+    );
+    must_execute_update_direct(
+        &admin_dsn,
+        &format!("GRANT CREATE SESSION, CREATE SCHEMA, CREATE TABLE TO {user}"),
+    );
+
+    let svc_dsn = dsn_with_credentials(&admin_dsn, &user, password);
+    let db = ExasolDb::new(ExasolDbConfig {
+        dsn: svc_dsn.clone(),
+        ..config_for_schema(&schema)
+    })
+    .expect("failed to build ExasolDb");
+
+    let bootstrap = db
+        .ensure_tables()
+        .expect("bootstrap ensure_tables should succeed");
+    assert!(bootstrap.tasks_table_created);
+    assert!(bootstrap.history_table_created);
+
+    must_execute_update_direct(
+        &admin_dsn,
+        &format!("REVOKE CREATE SCHEMA, CREATE TABLE FROM {user}"),
+    );
+
+    // Precondition: the statement the engine used to run unconditionally now fails.
+    let err = execute_update_direct(
+        &svc_dsn,
+        &format!("CREATE SCHEMA IF NOT EXISTS \"{schema}\""),
+    )
+    .expect_err("CREATE SCHEMA IF NOT EXISTS should require the CREATE SCHEMA privilege");
+    assert!(
+        err.to_lowercase().contains("insufficient privileges"),
+        "{err}"
+    );
+
+    let restart = db
+        .ensure_tables()
+        .expect("restart must not require CREATE SCHEMA when the schema exists");
+    assert!(!restart.tasks_table_created);
+    assert!(!restart.history_table_created);
+}
+
+#[test]
+fn ensure_tables_starts_with_admin_created_schema_and_table_grants_only() {
+    if skip_unless_enabled() {
+        return;
+    }
+
+    // Strict least-privilege path from docs/security.md: an admin owns the schema and
+    // tables; the service user only gets CREATE SESSION plus table-level grants.
+    let admin_dsn = nano_dsn();
+    let user = contract_schema_name("CODEX_SVC");
+    let schema = contract_schema_name("CODEX_STRICT");
+    let password = "Svc_Pw_12345";
+    let _user_guard = UserDropGuard {
+        dsn: admin_dsn.clone(),
+        user: user.clone(),
+    };
+    let _schema_guard = SchemaDropGuard::new(admin_dsn.clone(), schema.clone());
+
+    ExasolDb::new(config_for_schema(&schema))
+        .expect("failed to build admin ExasolDb")
+        .ensure_tables()
+        .expect("admin ensure_tables should succeed");
+    for sql in [
+        format!("CREATE USER {user} IDENTIFIED BY \"{password}\""),
+        format!("GRANT CREATE SESSION TO {user}"),
+        format!("GRANT SELECT ON TABLE {schema}.SCHED_TASKS TO {user}"),
+        format!("GRANT INSERT ON TABLE {schema}.SCHED_HISTORY TO {user}"),
+    ] {
+        must_execute_update_direct(&admin_dsn, &sql);
+    }
+
+    let db = ExasolDb::new(ExasolDbConfig {
+        dsn: dsn_with_credentials(&admin_dsn, &user, password),
+        ..config_for_schema(&schema)
+    })
+    .expect("failed to build ExasolDb");
+    let result = db
+        .ensure_tables()
+        .expect("startup must not require CREATE SCHEMA when the schema exists");
+    assert!(!result.tasks_table_created);
+    assert!(!result.history_table_created);
 }
 
 #[test]

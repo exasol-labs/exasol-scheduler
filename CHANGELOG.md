@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The scheduler no longer needs `CREATE SCHEMA` to start when its schema already
+  exists (BUG-40).** Startup used to run `CREATE SCHEMA IF NOT EXISTS` every time, and
+  Exasol checks the privilege even when the schema exists. So a least-privilege service
+  user could not restart after bootstrap privileges were revoked as `docs/security.md`
+  recommends, and neither could a user granted only table privileges on an
+  admin-created schema. The scheduler now checks `SYS.EXA_SCHEMAS` and only creates the
+  schema when it is missing.
+
+### Changed
+
+- Dependency updates: `exarrow-rs` 0.16 (from 0.14), plus in-range lockfile updates
+  (including `arrow` 58.4, `rustls` 0.23.45, `aws-lc-rs` 1.18, `thiserror` 2.0.21).
+  `arrow` stays on 58 because `exarrow-rs` 0.16 requires it.
+
 ## [0.3] - 2026-10-01
 
 ### Changed

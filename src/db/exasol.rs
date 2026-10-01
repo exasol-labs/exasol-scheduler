@@ -124,7 +124,13 @@ impl ExasolDb {
     /// Creates `SCHED_TASKS` and `SCHED_HISTORY` if they do not already exist.
     /// Safe to call on every startup — it is a no-op when both tables are present.
     pub fn ensure_tables(&self) -> Result<EnsureTablesResult, DbError> {
-        self.execute_schema_statement(&build_create_schema_sql(&self.config.schema))?;
+        // Exasol checks the CREATE SCHEMA privilege even for `IF NOT EXISTS`, so only
+        // attempt it when the schema is absent. Least-privilege service users that own
+        // a pre-created schema can then restart without CREATE SCHEMA.
+        if !self.schema_exists(&self.config.schema)? {
+            tracing::info!(schema = self.config.schema.as_str(), "creating schema");
+            self.execute_schema_statement(&build_create_schema_sql(&self.config.schema))?;
+        }
 
         let tasks_table_created = if !self
             .table_exists(&self.config.schema, &self.config.tasks_table)?
@@ -339,6 +345,11 @@ impl ExasolDb {
 
             result
         })
+    }
+
+    fn schema_exists(&self, schema: &str) -> Result<bool, DbError> {
+        let batches = self.query_batches("ensure_tables", build_schema_exists_query(schema))?;
+        Ok(batches.iter().any(|b| b.num_rows() > 0))
     }
 
     fn table_exists(&self, schema: &str, table: &str) -> Result<bool, DbError> {
@@ -599,6 +610,14 @@ pub fn build_tasks_last_changed_query(schema: &str, table: &str) -> String {
          ORDER BY LAST_COMMIT DESC LIMIT 1",
         quote_literal(schema),
         quote_literal(table)
+    )
+}
+
+/// Exact match: the schema is created as a quoted (case-sensitive) identifier.
+fn build_schema_exists_query(schema: &str) -> String {
+    format!(
+        "SELECT SCHEMA_NAME FROM SYS.EXA_SCHEMAS WHERE SCHEMA_NAME = {} LIMIT 1",
+        quote_literal(schema)
     )
 }
 
@@ -1392,6 +1411,12 @@ mod tests {
 
     #[test]
     fn create_table_sql_functions_quote_identifiers() {
+        let exists_sql = build_schema_exists_query("MY'SCHEMA");
+        assert_eq!(
+            exists_sql,
+            "SELECT SCHEMA_NAME FROM SYS.EXA_SCHEMAS WHERE SCHEMA_NAME = 'MY''SCHEMA' LIMIT 1"
+        );
+
         let schema_sql = build_create_schema_sql("MY\"SCHEMA");
         assert_eq!(schema_sql, "CREATE SCHEMA IF NOT EXISTS \"MY\"\"SCHEMA\"");
 

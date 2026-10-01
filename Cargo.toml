@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 # exarrow-rs provides production Exasol access.
-exarrow = { package = "exarrow-rs", version = "0.14.0" }
+exarrow = { package = "exarrow-rs", version = "0.16.0" }
 # Tokio: follow exarrow-rs guidance (rt-multi-thread + macros) while keeping features minimal.
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 chrono = { version = "0.4", features = ["serde"] }

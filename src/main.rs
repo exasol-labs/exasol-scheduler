@@ -372,7 +372,7 @@ mod tests {
         let err = run(Some("exasol://sys:pw@localhost:8563?tls=0".to_string())).unwrap_err();
         assert!(
             err.to_string()
-                .contains("connection failed during execute_statement")
+                .contains("connection failed during ensure_tables")
         );
     }
 
