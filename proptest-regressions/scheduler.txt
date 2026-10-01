@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 79e40dc0173b12f78033a65192bd243d9f55e76b1930692be2c5bfe7d7772ff8 # shrinks to ops = [Reload([None, None, None, Some(TaskRow { task_id: "d", enabled: true, schedule: "CRON 0 */2 * * * * TZ=Europe/Berlin", statement: "SELECT 1", after: None, is_final: false, comment: None, parallel_children: false })]), Reload([None, None, Some(TaskRow { task_id: "c", enabled: true, schedule: "CRON 0 * * * * * TZ=UTC", statement: "SELECT 1", after: None, is_final: false, comment: None, parallel_children: false }), None]), Reload([None, None, None, Some(TaskRow { task_id: "d", enabled: true, schedule: "CRON 0 */2 * * * * TZ=Europe/Berlin", statement: "SELECT 1", after: Some(""), is_final: false, comment: None, parallel_children: false })])]
+cc 8fc865605c6b20774edd0e0ab04feed498370f40026b284c176eef45fcd9aacc # shrinks to graph = [(None, false), (None, false), (None, false), (None, false), (Some(3), false), (Some(6), false), (Some(5), false), (Some(6), false)]
+cc 50d666b26461cae9fd9c156d8a023b9e8125a2cbeccecda3c3b88b9ac2f3b28a # shrinks to graph = [(Some(1), false), (Some(0), false)]

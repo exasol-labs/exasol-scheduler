@@ -1059,3 +1059,285 @@ mod dag_index_tests {
         assert!(!task.parallel_children);
     }
 }
+
+/// Property-based tests: compare the real cycle detection and schedule queue against
+/// deliberately naive reference implementations on randomly generated inputs.
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use chrono::TimeZone;
+    use proptest::prelude::*;
+
+    // --- find_cycles / build_dag_indexes ---
+
+    /// Parent index per task; an index >= n refers to a task that does not exist.
+    fn graph_strategy() -> impl Strategy<Value = Vec<(Option<usize>, bool)>> {
+        (1usize..=10).prop_flat_map(|n| {
+            prop::collection::vec((prop::option::of(0..n + 2), any::<bool>()), n)
+        })
+    }
+
+    fn graph_snapshot(graph: &[(Option<usize>, bool)]) -> HashMap<String, TaskDef> {
+        graph
+            .iter()
+            .enumerate()
+            .map(|(i, (parent, is_final))| {
+                let task = TaskDef {
+                    task_id: format!("t{i}"),
+                    enabled: true,
+                    parsed_schedule: None,
+                    statement: String::new(),
+                    after: parent.map(|p| format!("t{p}")),
+                    is_final: *is_final,
+                    parallel_children: true,
+                    schedule_fingerprint: 0,
+                    fingerprint: 0,
+                };
+                (task.task_id.clone(), task)
+            })
+            .collect()
+    }
+
+    /// Reference: a task is on a cycle iff following existing parents leads back to it.
+    fn reference_on_cycle(graph: &[(Option<usize>, bool)], start: usize) -> bool {
+        let parent = |i: usize| graph[i].0.filter(|&p| p < graph.len());
+        let mut current = parent(start);
+        for _ in 0..graph.len() {
+            match current {
+                Some(node) if node == start => return true,
+                Some(node) => current = parent(node),
+                None => return false,
+            }
+        }
+        false
+    }
+
+    proptest! {
+        #[test]
+        fn find_cycles_marks_exactly_the_tasks_on_a_cycle(graph in graph_strategy()) {
+            let cycles = find_cycles(&graph_snapshot(&graph));
+            for i in 0..graph.len() {
+                prop_assert_eq!(
+                    cycles.contains(&format!("t{i}")),
+                    reference_on_cycle(&graph, i),
+                    "task t{} in {:?}", i, graph
+                );
+            }
+        }
+
+        #[test]
+        fn dag_indexes_list_every_valid_task_once_under_its_parent(graph in graph_strategy()) {
+            let (children_of, finalizers_of) = build_dag_indexes(&graph_snapshot(&graph));
+
+            let mut expected_children: HashMap<String, Vec<String>> = HashMap::new();
+            let mut expected_finalizers: HashMap<String, Vec<String>> = HashMap::new();
+            for (i, (parent, is_final)) in graph.iter().enumerate() {
+                let Some(p) = parent.filter(|&p| p < graph.len()) else {
+                    continue; // root or orphan
+                };
+                if reference_on_cycle(&graph, i) || reference_on_cycle(&graph, p) {
+                    continue;
+                }
+                let target = if *is_final { &mut expected_finalizers } else { &mut expected_children };
+                target.entry(format!("t{p}")).or_default().push(format!("t{i}"));
+            }
+            for list in expected_children.values_mut().chain(expected_finalizers.values_mut()) {
+                list.sort();
+            }
+
+            prop_assert_eq!(children_of, expected_children);
+            prop_assert_eq!(finalizers_of, expected_finalizers);
+        }
+    }
+
+    // --- SchedulerState vs. a naive model ---
+
+    const IDS: [&str; 4] = ["a", "b", "c", "d"];
+
+    /// The first two differ only in whitespace and must be treated as the same schedule.
+    const SCHEDULES: [&str; 7] = [
+        "CRON 0 * * * * * TZ=UTC",
+        "CRON  0 * * * * *   TZ=UTC",
+        "CRON */20 * * * * * TZ=UTC",
+        "CRON 0 */2 * * * * TZ=Europe/Berlin",
+        "CRON 30 * * * * *",
+        "not a schedule",
+        "",
+    ];
+
+    const LOCAL_TZ: LocalTimeZone = LocalTimeZone::Named(chrono_tz::UTC);
+
+    #[derive(Debug, Clone)]
+    enum Op {
+        /// Replace the whole task table; `None` means the task id is absent.
+        Reload(Vec<Option<TaskRow>>),
+        Advance(i64),
+    }
+
+    fn row_strategy(task_id: &'static str) -> impl Strategy<Value = TaskRow> {
+        let after = prop_oneof![
+            4 => Just(None),
+            2 => prop::sample::select(IDS.to_vec()).prop_map(|id| Some(id.to_string())),
+            1 => Just(Some("missing".to_string())),
+            1 => Just(Some(String::new())), // treated as no parent
+        ];
+        (
+            prop::bool::weighted(0.8),
+            prop::sample::select(SCHEDULES.to_vec()),
+            prop::sample::select(vec!["SELECT 1", "SELECT 2"]),
+            after,
+            prop::bool::weighted(0.15),
+            any::<bool>(),
+        )
+            .prop_map(
+                move |(enabled, schedule, statement, after, is_final, parallel)| TaskRow {
+                    task_id: task_id.to_string(),
+                    enabled,
+                    schedule: schedule.to_string(),
+                    statement: statement.to_string(),
+                    after,
+                    is_final,
+                    comment: None,
+                    parallel_children: parallel,
+                },
+            )
+    }
+
+    fn op_strategy() -> impl Strategy<Value = Op> {
+        let table = IDS
+            .iter()
+            .map(|id| prop::option::weighted(0.75, row_strategy(id)).boxed())
+            .collect::<Vec<_>>();
+        prop_oneof![
+            1 => table.prop_map(Op::Reload),
+            2 => (1i64..=150).prop_map(Op::Advance),
+        ]
+    }
+
+    /// Naive model: per task, its row and the next due time if it is an active root.
+    #[derive(Default)]
+    struct Model {
+        tasks: HashMap<String, (TaskRow, Option<DateTime<Utc>>)>,
+    }
+
+    fn model_next_due(row: &TaskRow, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+        let has_parent = row.after.as_deref().is_some_and(|a| !a.trim().is_empty());
+        if !row.enabled || has_parent || row.is_final {
+            return None;
+        }
+        ParsedSchedule::parse(&row.schedule)
+            .ok()?
+            .next_after_with_local(now, LOCAL_TZ)
+    }
+
+    /// The fields that decide when a root fires; any change restarts its schedule.
+    fn schedule_key(row: &TaskRow) -> (bool, String, Option<String>, bool) {
+        let after = row.after.clone().filter(|a| !a.trim().is_empty());
+        (
+            row.enabled,
+            normalize_schedule_text(&row.schedule),
+            after,
+            row.is_final,
+        )
+    }
+
+    impl Model {
+        fn reload(&mut self, rows: &[TaskRow], now: DateTime<Utc>) {
+            let mut next = HashMap::new();
+            for row in rows {
+                let next_due = match self.tasks.get(&row.task_id) {
+                    Some((old, due)) if schedule_key(old) == schedule_key(row) => *due,
+                    _ => model_next_due(row, now),
+                };
+                next.insert(row.task_id.clone(), (row.clone(), next_due));
+            }
+            self.tasks = next;
+        }
+
+        fn drain(&mut self, now: DateTime<Utc>) -> Vec<(String, DateTime<Utc>)> {
+            let mut fired: Vec<(String, DateTime<Utc>)> = self
+                .tasks
+                .iter()
+                .filter_map(|(id, (_, due))| due.filter(|d| *d <= now).map(|d| (id.clone(), d)))
+                .collect();
+            fired.sort_by(|x, y| x.1.cmp(&y.1).then_with(|| x.0.cmp(&y.0)));
+            for (id, _) in &fired {
+                let (row, due) = self.tasks.get_mut(id).expect("fired task exists");
+                *due = model_next_due(row, now);
+            }
+            fired
+        }
+
+        fn next_due(&self) -> Option<DateTime<Utc>> {
+            self.tasks.values().filter_map(|(_, due)| *due).min()
+        }
+    }
+
+    fn drain_state(state: &mut SchedulerState, now: DateTime<Utc>) -> Vec<(String, DateTime<Utc>)> {
+        std::iter::from_fn(|| state.pop_due_root(now, LOCAL_TZ))
+            .map(|due| (due.task_id, due.scheduled_for))
+            .collect()
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(512))]
+
+        #[test]
+        fn scheduler_state_fires_like_naive_model(
+            ops in prop::collection::vec(op_strategy(), 1..40),
+        ) {
+            // Start just before the Europe/Berlin DST switch (2026-03-29 01:00 UTC).
+            let mut now = Utc.with_ymd_and_hms(2026, 3, 29, 0, 58, 0).unwrap();
+            let mut state = SchedulerState::default();
+            let mut model = Model::default();
+
+            for (step, op) in ops.iter().enumerate() {
+                match op {
+                    Op::Reload(table) => {
+                        let rows: Vec<TaskRow> = table.iter().flatten().cloned().collect();
+                        let snapshot = rows
+                            .iter()
+                            .cloned()
+                            .map(TaskDef::from_row)
+                            .map(|task| (task.task_id.clone(), task))
+                            .collect();
+                        state.apply_snapshot(snapshot, now, LOCAL_TZ);
+                        model.reload(&rows, now);
+                    }
+                    Op::Advance(secs) => now += chrono::Duration::seconds(*secs),
+                }
+
+                prop_assert_eq!(drain_state(&mut state, now), model.drain(now), "step {}", step);
+                prop_assert_eq!(state.next_due_utc(), model.next_due(), "step {}", step);
+
+                // Exactly the active roots are tracked, and none is lost from the heap.
+                // A root removed and re-added before time advances restarts at
+                // generation 1 with the same due time, so its stale entry matches the
+                // new one; that is harmless (the first pop bumps the generation and the
+                // duplicate is then discarded), so require at least one live entry.
+                let mut tracked: Vec<&String> = state.roots.keys().collect();
+                let mut expected: Vec<&String> = model
+                    .tasks
+                    .iter()
+                    .filter(|(_, (_, due))| due.is_some())
+                    .map(|(id, _)| id)
+                    .collect();
+                tracked.sort();
+                expected.sort();
+                prop_assert_eq!(tracked, expected, "step {}", step);
+                for (id, root) in &state.roots {
+                    let live = state
+                        .heap
+                        .iter()
+                        .filter(|item| {
+                            &item.task_id == id
+                                && item.generation == root.generation
+                                && item.due_at == root.next_due
+                        })
+                        .count();
+                    prop_assert!(live >= 1, "root {} has no live heap entry at step {}", id, step);
+                }
+            }
+        }
+    }
+}
