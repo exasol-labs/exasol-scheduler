@@ -20,6 +20,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the statement is prepared once per write and the values are bound. Error messages from
   failed tasks are stored verbatim whatever they contain, and the SQL shown in a failed
   history write no longer embeds the full error text.
+- **Clippy is clean and gates releases.** The release workflow runs
+  `cargo clippy --all-targets --locked -- -D warnings` before any build job, and CI runs
+  the same check. Minimum supported Rust is now 1.88 (`rust-version` in `Cargo.toml`),
+  because the code uses let-chains.
 
 ### Fixed
 

@@ -570,7 +570,7 @@ fn decode_task_rows_with_rejections(
                 let is_final = required_bool(is_final, row_idx, "IS_FINAL", operation)?;
                 let is_root = after
                     .as_deref()
-                    .map_or(true, |parent| parent.trim().is_empty())
+                    .is_none_or(|parent| parent.trim().is_empty())
                     && !is_final;
                 let schedule = match optional_string(schedules, row_idx) {
                     Some(schedule) => schedule,
@@ -1499,8 +1499,8 @@ mod tests {
         let alter_sql = format!(
             "ALTER TABLE {schema}.{table} ADD COLUMN \
              \"PARALLEL_CHILDREN\" BOOLEAN DEFAULT TRUE",
-            schema = format!("\"{}\"", schema),
-            table = format!("\"{}\"", table),
+            schema = quote_identifier(schema),
+            table = quote_identifier(table),
         );
         assert!(
             alter_sql.contains("DEFAULT TRUE"),

@@ -56,15 +56,15 @@ impl DbError {
         source: exarrow::QueryError,
         schema: Option<&str>,
     ) -> Self {
-        if let Some(schema) = schema {
-            if let Some(hint) = schema_query_hint(&source, schema) {
-                return Self::QueryWithHint {
-                    operation,
-                    sql,
-                    source,
-                    hint,
-                };
-            }
+        if let Some(schema) = schema
+            && let Some(hint) = schema_query_hint(&source, schema)
+        {
+            return Self::QueryWithHint {
+                operation,
+                sql,
+                source,
+                hint,
+            };
         }
 
         Self::Query {

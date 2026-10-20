@@ -1,3 +1,7 @@
+// Each integration test crate compiles this module separately and uses only some
+// of its helpers, so unused-item warnings here are expected.
+#![allow(dead_code)]
+
 use chrono::{DateTime, Utc};
 use exasol_scheduler::db::{DbError, SchedulerDb};
 use exasol_scheduler::model::{HistoryEvent, TaskRow};

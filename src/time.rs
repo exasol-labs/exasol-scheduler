@@ -33,10 +33,10 @@ impl FakeClock {
     }
 
     pub fn advance(&self, duration: std::time::Duration) {
-        if let Ok(mut guard) = self.now.lock() {
-            if let Ok(delta) = chrono::Duration::from_std(duration) {
-                *guard += delta;
-            }
+        if let Ok(mut guard) = self.now.lock()
+            && let Ok(delta) = chrono::Duration::from_std(duration)
+        {
+            *guard += delta;
         }
     }
 
@@ -49,7 +49,7 @@ impl Clock for FakeClock {
     fn now(&self) -> DateTime<Utc> {
         self.now
             .lock()
-            .map(|guard| guard.clone())
+            .map(|guard| *guard)
             .unwrap_or_else(|_| Utc::now())
     }
 }

@@ -676,11 +676,7 @@ impl SchedulerState {
     }
 
     fn discard_stale_heap_head(&mut self) {
-        loop {
-            let Some(head) = self.heap.peek() else {
-                break;
-            };
-
+        while let Some(head) = self.heap.peek() {
             let keep = self
                 .roots
                 .get(&head.task_id)
@@ -724,13 +720,7 @@ pub(crate) struct TaskDef {
 
 impl TaskDef {
     pub(crate) fn from_row(row: TaskRow) -> Self {
-        let after = row.after.and_then(|value| {
-            if value.trim().is_empty() {
-                None
-            } else {
-                Some(value)
-            }
-        });
+        let after = row.after.filter(|value| !value.trim().is_empty());
         let is_root = after.is_none() && !row.is_final;
         let parsed_schedule = if row.enabled && is_root {
             match ParsedSchedule::parse(&row.schedule) {

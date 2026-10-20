@@ -110,7 +110,7 @@ trait SanityCheck {
     fn db_calls_after_failure(&self, calls: usize) -> ();
 }
 impl SanityCheck for HistoryEvent {
-    fn db_calls_after_failure(&self, calls: usize) -> () {
+    fn db_calls_after_failure(&self, calls: usize) {
         assert_eq!(calls, 1, "write_history must have been called exactly once");
     }
 }

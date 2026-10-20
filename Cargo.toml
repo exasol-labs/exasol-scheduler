@@ -2,6 +2,7 @@
 name = "exasol_scheduler"
 version = "0.3.1"
 edition = "2024"
+rust-version = "1.88"
 
 [dependencies]
 # exarrow-rs provides production Exasol access.

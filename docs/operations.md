@@ -7,12 +7,18 @@ cargo build --release
 # Binary is at target/release/exasol_scheduler
 ```
 
-Requires Rust 1.85 or later (edition 2024).
+Requires Rust 1.88 or later (edition 2024, let-chains).
 
 **Run the test suite** (no Exasol required):
 
 ```bash
 cargo test
+```
+
+**Lint** (release builds are gated on this passing with no warnings):
+
+```bash
+cargo clippy --all-targets --locked -- -D warnings
 ```
 
 **Test coverage** (requires `cargo-llvm-cov`):

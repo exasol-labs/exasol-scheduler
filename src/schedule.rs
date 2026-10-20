@@ -21,14 +21,14 @@ impl ParsedSchedule {
         let mut timezone = ParsedTimeZone::LocalDefault;
         let mut cron_tokens = &tokens[1..];
 
-        if let Some(last) = cron_tokens.last().copied() {
-            if let Some(tz_name) = last.strip_prefix("TZ=") {
-                if tz_name.is_empty() {
-                    return Err(ScheduleParseError::InvalidTimeZone("".to_string()));
-                }
-                timezone = parse_timezone(tz_name)?;
-                cron_tokens = &cron_tokens[..cron_tokens.len() - 1];
+        if let Some(last) = cron_tokens.last().copied()
+            && let Some(tz_name) = last.strip_prefix("TZ=")
+        {
+            if tz_name.is_empty() {
+                return Err(ScheduleParseError::InvalidTimeZone("".to_string()));
             }
+            timezone = parse_timezone(tz_name)?;
+            cron_tokens = &cron_tokens[..cron_tokens.len() - 1];
         }
 
         if cron_tokens.len() != 6 {

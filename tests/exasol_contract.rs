@@ -191,12 +191,11 @@ fn read_history_status(db: &ExasolDb, run_id: &str) -> Option<String> {
     let sql = format!("SELECT STATUS FROM PUBLIC.SCHED_HISTORY WHERE RUN_ID = '{run_id}'");
     let batches = db.query_batches("read_history", sql).unwrap_or_default();
     for batch in &batches {
-        if batch.num_rows() > 0 {
-            if let Some(col) = batch.column_by_name("STATUS") {
-                if let Some(arr) = col.as_any().downcast_ref::<StringArray>() {
-                    return Some(arr.value(0).to_string());
-                }
-            }
+        if batch.num_rows() > 0
+            && let Some(col) = batch.column_by_name("STATUS")
+            && let Some(arr) = col.as_any().downcast_ref::<StringArray>()
+        {
+            return Some(arr.value(0).to_string());
         }
     }
     None
@@ -422,13 +421,12 @@ fn write_history_stores_graph_run_id_when_set() {
         .unwrap_or_default();
     let mut found = false;
     for batch in &batches {
-        if batch.num_rows() > 0 {
-            if let Some(col) = batch.column_by_name("GRAPH_RUN_ID") {
-                if let Some(arr) = col.as_any().downcast_ref::<StringArray>() {
-                    assert_eq!(arr.value(0), graph_run_id.to_string());
-                    found = true;
-                }
-            }
+        if batch.num_rows() > 0
+            && let Some(col) = batch.column_by_name("GRAPH_RUN_ID")
+            && let Some(arr) = col.as_any().downcast_ref::<StringArray>()
+        {
+            assert_eq!(arr.value(0), graph_run_id.to_string());
+            found = true;
         }
     }
     assert!(found, "GRAPH_RUN_ID row not found in SCHED_HISTORY");
@@ -558,12 +556,11 @@ fn read_history_phase(db: &ExasolDb, run_id: &str) -> Option<String> {
         .query_batches("read_graph_phase", sql)
         .unwrap_or_default();
     for batch in &batches {
-        if batch.num_rows() > 0 {
-            if let Some(col) = batch.column_by_name("GRAPH_PHASE") {
-                if let Some(arr) = col.as_any().downcast_ref::<StringArray>() {
-                    return Some(arr.value(0).to_string());
-                }
-            }
+        if batch.num_rows() > 0
+            && let Some(col) = batch.column_by_name("GRAPH_PHASE")
+            && let Some(arr) = col.as_any().downcast_ref::<StringArray>()
+        {
+            return Some(arr.value(0).to_string());
         }
     }
     None
@@ -575,12 +572,11 @@ fn read_history_graph_run_id(db: &ExasolDb, run_id: &str) -> Option<String> {
         .query_batches("read_graph_run_id_by_run", sql)
         .unwrap_or_default();
     for batch in &batches {
-        if batch.num_rows() > 0 {
-            if let Some(col) = batch.column_by_name("GRAPH_RUN_ID") {
-                if let Some(arr) = col.as_any().downcast_ref::<StringArray>() {
-                    return Some(arr.value(0).to_string());
-                }
-            }
+        if batch.num_rows() > 0
+            && let Some(col) = batch.column_by_name("GRAPH_RUN_ID")
+            && let Some(arr) = col.as_any().downcast_ref::<StringArray>()
+        {
+            return Some(arr.value(0).to_string());
         }
     }
     None
@@ -634,17 +630,17 @@ fn contract_dag_root_with_child_writes_two_history_rows() {
         .unwrap_or_default();
     let mut found = false;
     for batch in &batches {
-        if batch.num_rows() > 0 {
-            if let Some(col) = batch.column_by_name("CNT") {
-                // Exasol returns COUNT(*) as DECIMAL(18,0), which arrives as Decimal128.
-                use arrow::array::Decimal128Array;
-                let arr = col
-                    .as_any()
-                    .downcast_ref::<Decimal128Array>()
-                    .unwrap_or_else(|| panic!("CNT has unexpected type {:?}", col.data_type()));
-                assert!(arr.value(0) >= 2, "expected at least 2 history rows");
-                found = true;
-            }
+        if batch.num_rows() > 0
+            && let Some(col) = batch.column_by_name("CNT")
+        {
+            // Exasol returns COUNT(*) as DECIMAL(18,0), which arrives as Decimal128.
+            use arrow::array::Decimal128Array;
+            let arr = col
+                .as_any()
+                .downcast_ref::<Decimal128Array>()
+                .unwrap_or_else(|| panic!("CNT has unexpected type {:?}", col.data_type()));
+            assert!(arr.value(0) >= 2, "expected at least 2 history rows");
+            found = true;
         }
     }
     assert!(found, "COUNT query did not return a result");
@@ -669,12 +665,11 @@ fn contract_graph_run_id_matches_across_root_and_child() {
         .unwrap_or_default();
     let mut root_run_id = String::new();
     for batch in &batches {
-        if batch.num_rows() > 0 {
-            if let Some(col) = batch.column_by_name("RUN_ID") {
-                if let Some(arr) = col.as_any().downcast_ref::<StringArray>() {
-                    root_run_id = arr.value(0).to_string();
-                }
-            }
+        if batch.num_rows() > 0
+            && let Some(col) = batch.column_by_name("RUN_ID")
+            && let Some(arr) = col.as_any().downcast_ref::<StringArray>()
+        {
+            root_run_id = arr.value(0).to_string();
         }
     }
     assert!(!root_run_id.is_empty(), "no root history row found");
@@ -1090,12 +1085,11 @@ fn contract_finalizer_phase_is_recorded_as_final() {
         .unwrap_or_default();
     let mut fin_run_id = String::new();
     for batch in &batches {
-        if batch.num_rows() > 0 {
-            if let Some(col) = batch.column_by_name("RUN_ID") {
-                if let Some(arr) = col.as_any().downcast_ref::<StringArray>() {
-                    fin_run_id = arr.value(0).to_string();
-                }
-            }
+        if batch.num_rows() > 0
+            && let Some(col) = batch.column_by_name("RUN_ID")
+            && let Some(arr) = col.as_any().downcast_ref::<StringArray>()
+        {
+            fin_run_id = arr.value(0).to_string();
         }
     }
     assert!(!fin_run_id.is_empty(), "no finalizer history row found");
