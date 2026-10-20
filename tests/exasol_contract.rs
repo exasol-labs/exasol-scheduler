@@ -240,6 +240,38 @@ fn execute_statement_accepts_select_result_sets() {
 }
 
 #[test]
+fn sessions_report_scheduler_client_identity() {
+    if skip_unless_enabled() {
+        return;
+    }
+
+    let config = ExasolDbConfig {
+        dsn: exasol_scheduler::config::with_client_identity(&nano_dsn()),
+        ..nano_config()
+    };
+    let db = ExasolDb::new(config).expect("failed to build ExasolDb");
+
+    let batches = db
+        .query_batches(
+            "contract_client_identity",
+            "SELECT CLIENT FROM SYS.EXA_ALL_SESSIONS WHERE SESSION_ID = CURRENT_SESSION"
+                .to_string(),
+        )
+        .expect("session query should succeed");
+    let client = batches
+        .iter()
+        .find(|b| b.num_rows() > 0)
+        .and_then(|b| b.column(0).as_any().downcast_ref::<StringArray>())
+        .map(|col| col.value(0).to_string())
+        .expect("current session row should be present");
+    assert!(
+        client.contains(exasol_scheduler::config::CLIENT_NAME)
+            && client.contains(env!("CARGO_PKG_VERSION")),
+        "unexpected CLIENT value: {client}"
+    );
+}
+
+#[test]
 fn execute_statement_accepts_dml_row_counts() {
     if skip_unless_enabled() {
         return;

@@ -6,6 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **Scheduler sessions are identifiable in Exasol.** The DSN is tagged with
+  `client_name=exasol-scheduler&client_version=<version>`, so `EXA_DBA_SESSIONS.CLIENT`
+  shows which sessions (and so which running task statements) belong to the scheduler.
+  A `client_name` or `client_version` already in the DSN is kept.
+
 ### Fixed
 
 - **A DSN that names a schema which does not exist yet, such as `exasol://…/SCHED`, no

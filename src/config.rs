@@ -90,6 +90,7 @@ impl AppConfig {
         } else {
             dsn
         };
+        let dsn = with_client_identity(&dsn);
         let schema = if is_env_set("EXA_SCHEMA") {
             schema
         } else {
@@ -207,6 +208,16 @@ fn parse_bool(name: &str, value: &str) -> Result<bool, ConfigError> {
             message: format!("expected boolean (true/false/1/0), got '{value}'"),
         }),
     }
+}
+
+/// Client name the scheduler reports to Exasol, visible in `EXA_*_SESSIONS.CLIENT`.
+pub const CLIENT_NAME: &str = "exasol-scheduler";
+
+/// Tags the DSN with the scheduler's client name and version so its sessions can be
+/// told apart in `EXA_DBA_SESSIONS`. Values already present in the DSN win.
+pub fn with_client_identity(dsn: &str) -> String {
+    let dsn = append_query_param(dsn, "client_name", CLIENT_NAME);
+    append_query_param(&dsn, "client_version", env!("CARGO_PKG_VERSION"))
 }
 
 fn append_query_param(dsn: &str, key: &str, value: &str) -> String {
@@ -360,7 +371,11 @@ mod tests {
             let config = AppConfig::from_env().expect("env config should parse");
             assert_eq!(
                 config.exasol.dsn,
-                "exasol://sys:exasol@localhost:9999?tls=1&validateservercertificate=0"
+                format!(
+                    "exasol://sys:exasol@localhost:9999?tls=1&validateservercertificate=0\
+                     &client_name=exasol-scheduler&client_version={}",
+                    env!("CARGO_PKG_VERSION")
+                )
             );
             assert_eq!(config.exasol.schema, "APP");
             assert_eq!(config.exasol.tasks_table, "TASKS");
@@ -495,6 +510,29 @@ mod tests {
             assert!(config.exasol.dsn.contains("query_timeout=12"));
             assert!(!config.exasol.dsn.contains("query_timeout=20"));
         });
+    }
+
+    #[test]
+    fn tags_dsn_with_client_identity() {
+        with_clean_env(|| {
+            set_env("EXA_DSN", "exasol://sys:exasol@localhost:8563?tls=0");
+            let config = AppConfig::from_env().expect("config should parse");
+            assert_eq!(
+                config.exasol.dsn,
+                format!(
+                    "exasol://sys:exasol@localhost:8563?tls=0&client_name=exasol-scheduler&client_version={}",
+                    env!("CARGO_PKG_VERSION")
+                )
+            );
+        });
+    }
+
+    #[test]
+    fn keeps_client_identity_already_in_dsn() {
+        assert_eq!(
+            with_client_identity("exasol://u:p@h:8563?client_name=etl&client_version=9"),
+            "exasol://u:p@h:8563?client_name=etl&client_version=9"
+        );
     }
 
     #[test]

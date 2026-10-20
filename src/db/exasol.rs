@@ -317,11 +317,7 @@ impl ExasolDb {
     }
 
     fn execute_schema_statement(&self, sql: &str) -> Result<(), DbError> {
-        self.execute_statement_internal(
-            sql,
-            Some(self.config.schema.as_str()),
-            SessionSchema::None,
-        )
+        self.execute_statement_internal(sql, Some(self.config.schema.as_str()), SessionSchema::None)
     }
 
     fn execute_statement_internal(

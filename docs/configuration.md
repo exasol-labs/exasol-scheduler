@@ -30,6 +30,16 @@ exasol://user:password@host:port?tls=1&validateservercertificate=0&query_timeout
 
 The `tls` and `validateservercertificate` query parameters accept `0` or `1`. The `query_timeout` parameter is in seconds and is optional.
 
+The scheduler adds `client_name=exasol-scheduler&client_version=<version>` to the DSN, so its sessions are identifiable in `EXA_DBA_SESSIONS.CLIENT` / `EXA_ALL_SESSIONS.CLIENT`:
+
+```sql
+SELECT SESSION_ID, USER_NAME, STATUS, COMMAND_NAME, DURATION
+FROM SYS.EXA_DBA_SESSIONS
+WHERE CLIENT LIKE 'exasol-scheduler%';
+```
+
+Set `client_name` or `client_version` in the DSN yourself to override either value, for example to tell several scheduler instances apart.
+
 Boolean environment variables (`EXA_TLS`, `EXA_VALIDATE_SERVER_CERT`) accept: `1`, `true`, `yes`, `on` for true; `0`, `false`, `no`, `off` for false (all case-insensitive).
 
 ---
