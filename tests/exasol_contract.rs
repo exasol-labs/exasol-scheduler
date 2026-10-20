@@ -1,6 +1,6 @@
 use arrow::array::StringArray;
 use chrono::Timelike;
-use chrono::Utc;
+use chrono::{TimeZone, Utc};
 use exasol_scheduler::config::AppConfig;
 use exasol_scheduler::db::{ExasolDb, ExasolDbConfig, SchedulerDb};
 use exasol_scheduler::model::HistoryEvent;
@@ -464,6 +464,66 @@ fn write_history_handles_single_quotes_in_error_message() {
 
     let count = count_history_rows(&db, &run_id.to_string());
     assert_eq!(count, 1);
+}
+
+#[test]
+fn write_history_round_trips_bound_values_exactly() {
+    if skip_unless_enabled() {
+        return;
+    }
+
+    let db = ExasolDb::new(nano_config()).expect("failed to build ExasolDb");
+    setup_tables(&db);
+
+    let run_id = Uuid::new_v4();
+    let graph_run_id = Uuid::new_v4();
+    let started_at =
+        Utc.with_ymd_and_hms(2026, 3, 4, 5, 6, 7).unwrap() + chrono::Duration::milliseconds(89);
+    // Characters that string-built SQL would have to escape or could misread.
+    let error_message = "it's 'quoted' ? -- ; DROP TABLE x; \\ \n line2 ✓";
+    let event = HistoryEvent {
+        run_id,
+        graph_run_id: Some(graph_run_id),
+        task_id: "contract_task".to_string(),
+        graph_phase: "MAIN".to_string(),
+        scheduled_for: None,
+        started_at,
+        finished_at: Some(started_at + chrono::Duration::seconds(1)),
+        status: "FAILED".to_string(),
+        error_message: Some(error_message.to_string()),
+    };
+
+    db.write_history(&event)
+        .expect("write_history should bind all values");
+
+    let sql = format!(
+        "SELECT GRAPH_RUN_ID, \
+                TO_CHAR(STARTED_AT, 'YYYY-MM-DD HH24:MI:SS.FF3') AS STARTED, \
+                TO_CHAR(FINISHED_AT, 'YYYY-MM-DD HH24:MI:SS.FF3') AS FINISHED, \
+                CASE WHEN SCHEDULED_FOR IS NULL THEN 'NULL' ELSE 'SET' END AS SCHEDULED, \
+                ERROR_MESSAGE \
+         FROM PUBLIC.SCHED_HISTORY WHERE RUN_ID = '{run_id}'"
+    );
+    let batches = db
+        .query_batches("read_round_trip", sql)
+        .expect("history row should be readable");
+    let batch = batches
+        .iter()
+        .find(|b| b.num_rows() > 0)
+        .expect("history row should exist");
+    let text = |name: &str| {
+        batch
+            .column_by_name(name)
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            .map(|c| c.value(0).to_string())
+            .unwrap_or_else(|| panic!("column {name} should be text"))
+    };
+
+    assert_eq!(text("GRAPH_RUN_ID"), graph_run_id.to_string());
+    assert_eq!(text("STARTED"), "2026-03-04 05:06:07.089");
+    assert_eq!(text("FINISHED"), "2026-03-04 05:06:08.089");
+    assert_eq!(text("SCHEDULED"), "NULL");
+    assert_eq!(text("ERROR_MESSAGE"), error_message);
 }
 
 // --- Stage 3 contract tests: DAG execution against a real Exasol instance ---

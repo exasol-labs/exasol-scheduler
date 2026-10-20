@@ -13,6 +13,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   shows which sessions (and so which running task statements) belong to the scheduler.
   A `client_name` or `client_version` already in the DSN is kept.
 
+### Changed
+
+- **History rows are written with server-side bound parameters.** Task ids, error
+  messages, and timestamps are no longer spliced into the `INSERT` as escaped literals;
+  the statement is prepared once per write and the values are bound. Error messages from
+  failed tasks are stored verbatim whatever they contain, and the SQL shown in a failed
+  history write no longer embeds the full error text.
+
 ### Fixed
 
 - **A DSN that names a schema which does not exist yet, such as `exasol://…/SCHED`, no

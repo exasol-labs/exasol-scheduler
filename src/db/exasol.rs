@@ -7,6 +7,7 @@ use arrow::array::{
 use arrow::datatypes::TimeUnit;
 use arrow::record_batch::RecordBatch;
 use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
+use exarrow::Parameter;
 use exarrow::adbc::{Database, Driver};
 
 use crate::db::{DbError, SchedulerDb};
@@ -428,18 +429,32 @@ impl SchedulerDb for ExasolDb {
 
     fn write_history(&self, event: &HistoryEvent) -> Result<(), DbError> {
         let operation = "write_history";
-        let sql = build_write_history_sql(&self.config.schema, &self.config.history_table, event);
+        let sql = build_write_history_sql(&self.config.schema, &self.config.history_table);
+        let parameters = history_parameters(event);
         Self::run_async(operation, async {
             let mut connection = self.connect(operation, SessionSchema::None).await?;
-            let result = connection
-                .execute_update(sql.clone())
+            let query_error = |source| DbError::Query {
+                operation,
+                sql: sql.clone(),
+                source,
+            };
+            let result = async {
+                let mut prepared = connection.prepare(sql.clone()).await.map_err(query_error)?;
+                let executed = async {
+                    for (index, value) in parameters.into_iter().enumerate() {
+                        prepared.bind(index, value)?;
+                    }
+                    connection.execute_prepared_update(&prepared).await
+                }
                 .await
                 .map(|_| ())
-                .map_err(|source| DbError::Query {
-                    operation,
-                    sql,
-                    source,
-                });
+                .map_err(query_error);
+                if let Err(close_err) = connection.close_prepared(prepared).await {
+                    tracing::warn!(operation, error = %close_err, "failed to close prepared statement");
+                }
+                executed
+            }
+            .await;
             if let Err(close_err) = connection.close().await {
                 tracing::warn!(operation, error = %close_err, "failed to close Exasol connection");
             }
@@ -713,47 +728,43 @@ pub fn build_create_history_table_sql(schema: &str, table: &str) -> String {
     )
 }
 
-pub fn build_write_history_sql(schema: &str, history_table: &str, event: &HistoryEvent) -> String {
-    let graph_run_id = event
-        .graph_run_id
-        .map(|id| quote_literal(&id.to_string()))
-        .unwrap_or_else(|| "NULL".to_string());
-    let scheduled_for = event
-        .scheduled_for
-        .map(|ts| format!("TIMESTAMP '{}'", ts.format("%Y-%m-%d %H:%M:%S%.3f")))
-        .unwrap_or_else(|| "NULL".to_string());
-    let started_at = format!(
-        "TIMESTAMP '{}'",
-        event.started_at.format("%Y-%m-%d %H:%M:%S%.3f")
-    );
-    let finished_at = event
-        .finished_at
-        .map(|ts| format!("TIMESTAMP '{}'", ts.format("%Y-%m-%d %H:%M:%S%.3f")))
-        .unwrap_or_else(|| "NULL".to_string());
-    let error_message = event
-        .error_message
-        .as_deref()
-        .map(quote_literal)
-        .unwrap_or_else(|| "NULL".to_string());
-
+/// INSERT for one history row. Values are bound as parameters (see
+/// [`history_parameters`]), so task ids and error messages are never spliced into SQL.
+pub fn build_write_history_sql(schema: &str, history_table: &str) -> String {
     format!(
         "INSERT INTO {schema}.{table} \
          (RUN_ID, GRAPH_RUN_ID, TASK_ID, GRAPH_PHASE, \
           SCHEDULED_FOR, STARTED_AT, FINISHED_AT, STATUS, ERROR_MESSAGE) \
-         VALUES ({run_id}, {graph_run_id}, {task_id}, {graph_phase}, \
-                 {scheduled_for}, {started_at}, {finished_at}, {status}, {error_message})",
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         schema = quote_identifier(schema),
         table = quote_identifier(history_table),
-        run_id = quote_literal(&event.run_id.to_string()),
-        graph_run_id = graph_run_id,
-        task_id = quote_literal(&event.task_id),
-        graph_phase = quote_literal(&event.graph_phase),
-        scheduled_for = scheduled_for,
-        started_at = started_at,
-        finished_at = finished_at,
-        status = quote_literal(&event.status),
-        error_message = error_message,
     )
+}
+
+/// Parameters for [`build_write_history_sql`], in column order.
+pub fn history_parameters(event: &HistoryEvent) -> Vec<Parameter> {
+    fn timestamp(ts: DateTime<Utc>) -> Parameter {
+        Parameter::String(ts.format("%Y-%m-%d %H:%M:%S%.3f").to_string())
+    }
+    fn optional(value: Option<Parameter>) -> Parameter {
+        value.unwrap_or(Parameter::Null)
+    }
+
+    vec![
+        Parameter::String(event.run_id.to_string()),
+        optional(
+            event
+                .graph_run_id
+                .map(|id| Parameter::String(id.to_string())),
+        ),
+        Parameter::String(event.task_id.clone()),
+        Parameter::String(event.graph_phase.clone()),
+        optional(event.scheduled_for.map(timestamp)),
+        timestamp(event.started_at),
+        optional(event.finished_at.map(timestamp)),
+        Parameter::String(event.status.clone()),
+        optional(event.error_message.clone().map(Parameter::String)),
+    ]
 }
 
 fn quote_identifier(value: &str) -> String {
@@ -1286,65 +1297,77 @@ mod tests {
         }
     }
 
+    // `Parameter` has no `PartialEq`, so compare its `Debug` form.
+    fn debug(params: &[Parameter]) -> Vec<String> {
+        params.iter().map(|p| format!("{p:?}")).collect()
+    }
+
+    fn string(value: &str) -> String {
+        format!("{:?}", Parameter::String(value.to_string()))
+    }
+
+    fn null() -> String {
+        format!("{:?}", Parameter::Null)
+    }
+
     #[test]
-    fn write_history_sql_contains_all_required_fields() {
-        let event = sample_event();
-        let sql = build_write_history_sql("PUBLIC", "SCHED_HISTORY", &event);
+    fn write_history_sql_uses_placeholders_for_every_column() {
+        let sql = build_write_history_sql("PUBLIC", "SCHED_HISTORY");
         assert!(sql.contains("INSERT INTO \"PUBLIC\".\"SCHED_HISTORY\""));
         assert!(sql.contains("RUN_ID, GRAPH_RUN_ID, TASK_ID, GRAPH_PHASE"));
         assert!(sql.contains("SCHEDULED_FOR, STARTED_AT, FINISHED_AT, STATUS, ERROR_MESSAGE"));
-        assert!(sql.contains(&format!("'{}'", Uuid::nil())));
-        assert!(sql.contains("'task_1'"));
-        assert!(sql.contains("'MAIN'"));
-        assert!(sql.contains("'SUCCEEDED'"));
-        assert!(sql.contains("TIMESTAMP '2026-01-02 03:00:00.000'"));
-        assert!(sql.contains("TIMESTAMP '2026-01-02 03:04:05.000'"));
-        assert!(sql.contains("TIMESTAMP '2026-01-02 03:04:06.000'"));
+        assert!(sql.contains("VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"));
+        assert!(
+            !sql.contains('\''),
+            "no literals should be spliced into the SQL"
+        );
     }
 
     #[test]
-    fn write_history_sql_uses_null_for_absent_optional_fields() {
+    fn history_parameters_follow_column_order() {
+        assert_eq!(
+            debug(&history_parameters(&sample_event())),
+            vec![
+                string(&Uuid::nil().to_string()),
+                null(),
+                string("task_1"),
+                string("MAIN"),
+                string("2026-01-02 03:00:00.000"),
+                string("2026-01-02 03:04:05.000"),
+                string("2026-01-02 03:04:06.000"),
+                string("SUCCEEDED"),
+                null(),
+            ]
+        );
+    }
+
+    #[test]
+    fn history_parameters_use_null_for_absent_optional_fields() {
         let mut event = sample_event();
-        event.graph_run_id = None;
         event.scheduled_for = None;
         event.finished_at = None;
-        event.error_message = None;
-        let sql = build_write_history_sql("PUBLIC", "SCHED_HISTORY", &event);
-        // Four NULLs: graph_run_id, scheduled_for, finished_at, error_message
-        assert_eq!(sql.matches("NULL").count(), 4);
+        let params = debug(&history_parameters(&event));
+        // graph_run_id, scheduled_for, finished_at, error_message
+        assert_eq!(params.iter().filter(|p| **p == null()).count(), 4);
     }
 
     #[test]
-    fn write_history_sql_includes_graph_run_id_when_set() {
+    fn history_parameters_include_optional_fields_when_set() {
         let mut event = sample_event();
         let gid = Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
         event.graph_run_id = Some(gid);
-        let sql = build_write_history_sql("PUBLIC", "SCHED_HISTORY", &event);
-        assert!(sql.contains("'11111111-1111-1111-1111-111111111111'"));
-    }
-
-    #[test]
-    fn write_history_sql_includes_error_message_when_set() {
-        let mut event = sample_event();
         event.status = "FAILED".to_string();
-        event.error_message = Some("it broke".to_string());
-        let sql = build_write_history_sql("PUBLIC", "SCHED_HISTORY", &event);
-        assert!(sql.contains("'FAILED'"));
-        assert!(sql.contains("'it broke'"));
-    }
-
-    #[test]
-    fn write_history_sql_escapes_single_quotes_in_error_message() {
-        let mut event = sample_event();
         event.error_message = Some("can't connect".to_string());
-        let sql = build_write_history_sql("PUBLIC", "SCHED_HISTORY", &event);
-        assert!(sql.contains("'can''t connect'"));
+        let params = debug(&history_parameters(&event));
+        assert_eq!(params[1], string("11111111-1111-1111-1111-111111111111"));
+        assert_eq!(params[7], string("FAILED"));
+        // Bound verbatim: escaping is the server's job, not ours.
+        assert_eq!(params[8], string("can't connect"));
     }
 
     #[test]
     fn write_history_sql_quotes_schema_and_table_identifiers() {
-        let event = sample_event();
-        let sql = build_write_history_sql("MY\"SCHEMA", "HIST\"TABLE", &event);
+        let sql = build_write_history_sql("MY\"SCHEMA", "HIST\"TABLE");
         assert!(sql.contains("\"MY\"\"SCHEMA\".\"HIST\"\"TABLE\""));
     }
 
