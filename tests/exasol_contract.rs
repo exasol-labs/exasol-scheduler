@@ -631,6 +631,45 @@ fn ensure_tables_creates_tables_when_they_do_not_exist() {
     );
 }
 
+/// Inserts `/schema` before the query string of an `exasol://...` DSN.
+fn dsn_with_schema(dsn: &str, schema: &str) -> String {
+    match dsn.split_once('?') {
+        Some((base, query)) => format!("{base}/{schema}?{query}"),
+        None => format!("{dsn}/{schema}"),
+    }
+}
+
+#[test]
+fn ensure_tables_creates_schema_named_in_dsn() {
+    if skip_unless_enabled() {
+        return;
+    }
+
+    let dsn = nano_dsn();
+    let schema = contract_schema_name("CODEX_DSN_SCHEMA");
+    let _guard = SchemaDropGuard::new(dsn.clone(), schema.clone());
+
+    // exarrow-rs >= 0.21 refuses to connect when the DSN schema does not exist,
+    // so bootstrap must not depend on it.
+    let config = ExasolDbConfig {
+        dsn: dsn_with_schema(&dsn, &schema),
+        ..config_for_schema(&schema)
+    };
+    let db = ExasolDb::new(config).expect("failed to build ExasolDb");
+
+    let result = db
+        .ensure_tables()
+        .expect("ensure_tables should create the DSN schema");
+    assert!(result.tasks_table_created);
+    assert!(result.history_table_created);
+    assert!(table_exists(&db, &schema, "SCHED_TASKS"));
+
+    // Task SQL still runs with the DSN schema as its current schema.
+    db.execute_statement("CREATE TABLE UNQUALIFIED_TASK_TABLE (X INT)")
+        .expect("unqualified task SQL should resolve against the DSN schema");
+    assert!(table_exists(&db, &schema, "UNQUALIFIED_TASK_TABLE"));
+}
+
 struct UserDropGuard {
     dsn: String,
     user: String,

@@ -6,6 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A DSN that names a schema which does not exist yet, such as `exasol://…/SCHED`, no
+  longer stops the first startup.** `exarrow-rs` 0.21+ refuses to connect when the DSN
+  schema is missing, which blocked the bootstrap that creates it. The scheduler's own
+  queries (bootstrap, task loading, history) now connect without a current schema, since
+  they are fully qualified. Task SQL still runs with the DSN schema as its current schema.
+
+### Changed
+
+- Dependency updates: `exarrow-rs` 0.25 (from 0.16) and `arrow` 59 (from 58, required by
+  `exarrow-rs` 0.23+), `proptest` 1.12, plus in-range lockfile updates (including
+  `tokio` 1.54, `uuid` 1.28, `rustls` 0.23.46 for RUSTSEC-2026-0346). `thrift` is no
+  longer in the dependency tree. Behaviour picked up from the driver:
+  - The connection timeout now bounds TCP connect, TLS, and login together, so an
+    unresponsive server fails the poll instead of hanging it.
+  - Large `SCHED_TASKS` results are returned exactly once per row (row duplication/loss on
+    multi-message results is fixed).
+  - Unknown DSN query keys are now rejected with an error naming the key. `autocommit=`,
+    `queryTimeout=`, and `idle_timeout` are no longer accepted; use `query_timeout` (or
+    `EXA_QUERY_TIMEOUT_SECS`).
+  - Servers reporting native protocol version below 14 are refused at login.
+
 ## [0.3.1] - 2026-10-01
 
 ### Fixed

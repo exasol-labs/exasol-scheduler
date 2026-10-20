@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 # exarrow-rs provides production Exasol access.
-exarrow = { package = "exarrow-rs", version = "0.16.0" }
+exarrow = { package = "exarrow-rs", version = "0.25.0" }
 # Tokio: follow exarrow-rs guidance (rt-multi-thread + macros) while keeping features minimal.
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 chrono = { version = "0.4", features = ["serde"] }
@@ -17,9 +17,9 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-arrow = "58"
+arrow = "59"
 
 [dev-dependencies]
 mockall = "0.15"
 pretty_assertions = "1"
-proptest = "1.11"
+proptest = "1.12"

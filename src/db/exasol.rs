@@ -7,7 +7,7 @@ use arrow::array::{
 use arrow::datatypes::TimeUnit;
 use arrow::record_batch::RecordBatch;
 use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
-use exarrow::adbc::Driver;
+use exarrow::adbc::{Database, Driver};
 
 use crate::db::{DbError, SchedulerDb};
 use crate::model::{HistoryEvent, TaskRow};
@@ -27,6 +27,15 @@ pub struct EnsureTablesResult {
     pub sql_text_column_renamed: bool,
     pub parallel_children_added: bool,
     pub schedule_nullable_altered: bool,
+}
+
+/// Which current schema a connection opens with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionSchema {
+    /// No current schema, even when the DSN names one.
+    None,
+    /// The schema named in the DSN, if any.
+    FromDsn,
 }
 
 /// Production Exasol adapter backed by exarrow-rs.
@@ -85,11 +94,24 @@ impl ExasolDb {
         runtime.block_on(future)
     }
 
-    async fn connect(&self, operation: &'static str) -> Result<exarrow::Connection, DbError> {
+    async fn connect(
+        &self,
+        operation: &'static str,
+        session_schema: SessionSchema,
+    ) -> Result<exarrow::Connection, DbError> {
         let driver = Driver::new();
-        let database = driver
+        let mut database = driver
             .open(&self.config.dsn)
             .map_err(|source| DbError::Connection { operation, source })?;
+
+        if session_schema == SessionSchema::None && database.params().schema.is_some() {
+            // exarrow-rs refuses to connect when the DSN schema does not exist, which
+            // would block the bootstrap that creates it. Scheduler SQL is fully
+            // qualified, so it never needs the DSN schema as its current schema.
+            let mut params = database.params().clone();
+            params.schema = None;
+            database = Database::new(params);
+        }
 
         database
             .connect()
@@ -103,7 +125,7 @@ impl ExasolDb {
         sql: String,
     ) -> Result<Vec<RecordBatch>, DbError> {
         Self::run_async(operation, async {
-            let mut connection = self.connect(operation).await?;
+            let mut connection = self.connect(operation, SessionSchema::None).await?;
             let result = connection
                 .query(sql.clone())
                 .await
@@ -295,19 +317,24 @@ impl ExasolDb {
     }
 
     fn execute_schema_statement(&self, sql: &str) -> Result<(), DbError> {
-        self.execute_statement_internal(sql, Some(self.config.schema.as_str()))
+        self.execute_statement_internal(
+            sql,
+            Some(self.config.schema.as_str()),
+            SessionSchema::None,
+        )
     }
 
     fn execute_statement_internal(
         &self,
         sql: &str,
         schema_hint: Option<&str>,
+        session_schema: SessionSchema,
     ) -> Result<(), DbError> {
         let operation = "execute_statement";
         let sql_text = sql.to_string();
 
         Self::run_async(operation, async {
-            let mut connection = self.connect(operation).await?;
+            let mut connection = self.connect(operation, session_schema).await?;
 
             let result = async {
                 let result_set = connection
@@ -399,14 +426,15 @@ impl SchedulerDb for ExasolDb {
     }
 
     fn execute_statement(&self, sql: &str) -> Result<(), DbError> {
-        self.execute_statement_internal(sql, None)
+        // Task SQL may use unqualified names, so it keeps the DSN schema as default.
+        self.execute_statement_internal(sql, None, SessionSchema::FromDsn)
     }
 
     fn write_history(&self, event: &HistoryEvent) -> Result<(), DbError> {
         let operation = "write_history";
         let sql = build_write_history_sql(&self.config.schema, &self.config.history_table, event);
         Self::run_async(operation, async {
-            let mut connection = self.connect(operation).await?;
+            let mut connection = self.connect(operation, SessionSchema::None).await?;
             let result = connection
                 .execute_update(sql.clone())
                 .await
