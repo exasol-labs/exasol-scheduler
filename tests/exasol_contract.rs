@@ -1,6 +1,6 @@
 use arrow::array::StringArray;
 use chrono::Timelike;
-use chrono::Utc;
+use chrono::{TimeZone, Utc};
 use exasol_scheduler::config::AppConfig;
 use exasol_scheduler::db::{ExasolDb, ExasolDbConfig, SchedulerDb};
 use exasol_scheduler::model::HistoryEvent;
@@ -191,12 +191,11 @@ fn read_history_status(db: &ExasolDb, run_id: &str) -> Option<String> {
     let sql = format!("SELECT STATUS FROM PUBLIC.SCHED_HISTORY WHERE RUN_ID = '{run_id}'");
     let batches = db.query_batches("read_history", sql).unwrap_or_default();
     for batch in &batches {
-        if batch.num_rows() > 0 {
-            if let Some(col) = batch.column_by_name("STATUS") {
-                if let Some(arr) = col.as_any().downcast_ref::<StringArray>() {
-                    return Some(arr.value(0).to_string());
-                }
-            }
+        if batch.num_rows() > 0
+            && let Some(col) = batch.column_by_name("STATUS")
+            && let Some(arr) = col.as_any().downcast_ref::<StringArray>()
+        {
+            return Some(arr.value(0).to_string());
         }
     }
     None
@@ -237,6 +236,38 @@ fn execute_statement_accepts_select_result_sets() {
 
     db.execute_statement("SELECT 1")
         .expect("execute_statement must accept SELECT result sets for scheduled tasks");
+}
+
+#[test]
+fn sessions_report_scheduler_client_identity() {
+    if skip_unless_enabled() {
+        return;
+    }
+
+    let config = ExasolDbConfig {
+        dsn: exasol_scheduler::config::with_client_identity(&nano_dsn()),
+        ..nano_config()
+    };
+    let db = ExasolDb::new(config).expect("failed to build ExasolDb");
+
+    let batches = db
+        .query_batches(
+            "contract_client_identity",
+            "SELECT CLIENT FROM SYS.EXA_ALL_SESSIONS WHERE SESSION_ID = CURRENT_SESSION"
+                .to_string(),
+        )
+        .expect("session query should succeed");
+    let client = batches
+        .iter()
+        .find(|b| b.num_rows() > 0)
+        .and_then(|b| b.column(0).as_any().downcast_ref::<StringArray>())
+        .map(|col| col.value(0).to_string())
+        .expect("current session row should be present");
+    assert!(
+        client.contains(exasol_scheduler::config::CLIENT_NAME)
+            && client.contains(env!("CARGO_PKG_VERSION")),
+        "unexpected CLIENT value: {client}"
+    );
 }
 
 #[test]
@@ -390,13 +421,12 @@ fn write_history_stores_graph_run_id_when_set() {
         .unwrap_or_default();
     let mut found = false;
     for batch in &batches {
-        if batch.num_rows() > 0 {
-            if let Some(col) = batch.column_by_name("GRAPH_RUN_ID") {
-                if let Some(arr) = col.as_any().downcast_ref::<StringArray>() {
-                    assert_eq!(arr.value(0), graph_run_id.to_string());
-                    found = true;
-                }
-            }
+        if batch.num_rows() > 0
+            && let Some(col) = batch.column_by_name("GRAPH_RUN_ID")
+            && let Some(arr) = col.as_any().downcast_ref::<StringArray>()
+        {
+            assert_eq!(arr.value(0), graph_run_id.to_string());
+            found = true;
         }
     }
     assert!(found, "GRAPH_RUN_ID row not found in SCHED_HISTORY");
@@ -434,6 +464,66 @@ fn write_history_handles_single_quotes_in_error_message() {
     assert_eq!(count, 1);
 }
 
+#[test]
+fn write_history_round_trips_bound_values_exactly() {
+    if skip_unless_enabled() {
+        return;
+    }
+
+    let db = ExasolDb::new(nano_config()).expect("failed to build ExasolDb");
+    setup_tables(&db);
+
+    let run_id = Uuid::new_v4();
+    let graph_run_id = Uuid::new_v4();
+    let started_at =
+        Utc.with_ymd_and_hms(2026, 3, 4, 5, 6, 7).unwrap() + chrono::Duration::milliseconds(89);
+    // Characters that string-built SQL would have to escape or could misread.
+    let error_message = "it's 'quoted' ? -- ; DROP TABLE x; \\ \n line2 ✓";
+    let event = HistoryEvent {
+        run_id,
+        graph_run_id: Some(graph_run_id),
+        task_id: "contract_task".to_string(),
+        graph_phase: "MAIN".to_string(),
+        scheduled_for: None,
+        started_at,
+        finished_at: Some(started_at + chrono::Duration::seconds(1)),
+        status: "FAILED".to_string(),
+        error_message: Some(error_message.to_string()),
+    };
+
+    db.write_history(&event)
+        .expect("write_history should bind all values");
+
+    let sql = format!(
+        "SELECT GRAPH_RUN_ID, \
+                TO_CHAR(STARTED_AT, 'YYYY-MM-DD HH24:MI:SS.FF3') AS STARTED, \
+                TO_CHAR(FINISHED_AT, 'YYYY-MM-DD HH24:MI:SS.FF3') AS FINISHED, \
+                CASE WHEN SCHEDULED_FOR IS NULL THEN 'NULL' ELSE 'SET' END AS SCHEDULED, \
+                ERROR_MESSAGE \
+         FROM PUBLIC.SCHED_HISTORY WHERE RUN_ID = '{run_id}'"
+    );
+    let batches = db
+        .query_batches("read_round_trip", sql)
+        .expect("history row should be readable");
+    let batch = batches
+        .iter()
+        .find(|b| b.num_rows() > 0)
+        .expect("history row should exist");
+    let text = |name: &str| {
+        batch
+            .column_by_name(name)
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+            .map(|c| c.value(0).to_string())
+            .unwrap_or_else(|| panic!("column {name} should be text"))
+    };
+
+    assert_eq!(text("GRAPH_RUN_ID"), graph_run_id.to_string());
+    assert_eq!(text("STARTED"), "2026-03-04 05:06:07.089");
+    assert_eq!(text("FINISHED"), "2026-03-04 05:06:08.089");
+    assert_eq!(text("SCHEDULED"), "NULL");
+    assert_eq!(text("ERROR_MESSAGE"), error_message);
+}
+
 // --- Stage 3 contract tests: DAG execution against a real Exasol instance ---
 
 fn setup_dag_tasks(db: &ExasolDb) {
@@ -466,12 +556,11 @@ fn read_history_phase(db: &ExasolDb, run_id: &str) -> Option<String> {
         .query_batches("read_graph_phase", sql)
         .unwrap_or_default();
     for batch in &batches {
-        if batch.num_rows() > 0 {
-            if let Some(col) = batch.column_by_name("GRAPH_PHASE") {
-                if let Some(arr) = col.as_any().downcast_ref::<StringArray>() {
-                    return Some(arr.value(0).to_string());
-                }
-            }
+        if batch.num_rows() > 0
+            && let Some(col) = batch.column_by_name("GRAPH_PHASE")
+            && let Some(arr) = col.as_any().downcast_ref::<StringArray>()
+        {
+            return Some(arr.value(0).to_string());
         }
     }
     None
@@ -483,12 +572,11 @@ fn read_history_graph_run_id(db: &ExasolDb, run_id: &str) -> Option<String> {
         .query_batches("read_graph_run_id_by_run", sql)
         .unwrap_or_default();
     for batch in &batches {
-        if batch.num_rows() > 0 {
-            if let Some(col) = batch.column_by_name("GRAPH_RUN_ID") {
-                if let Some(arr) = col.as_any().downcast_ref::<StringArray>() {
-                    return Some(arr.value(0).to_string());
-                }
-            }
+        if batch.num_rows() > 0
+            && let Some(col) = batch.column_by_name("GRAPH_RUN_ID")
+            && let Some(arr) = col.as_any().downcast_ref::<StringArray>()
+        {
+            return Some(arr.value(0).to_string());
         }
     }
     None
@@ -542,17 +630,17 @@ fn contract_dag_root_with_child_writes_two_history_rows() {
         .unwrap_or_default();
     let mut found = false;
     for batch in &batches {
-        if batch.num_rows() > 0 {
-            if let Some(col) = batch.column_by_name("CNT") {
-                // Exasol returns COUNT(*) as DECIMAL(18,0), which arrives as Decimal128.
-                use arrow::array::Decimal128Array;
-                let arr = col
-                    .as_any()
-                    .downcast_ref::<Decimal128Array>()
-                    .unwrap_or_else(|| panic!("CNT has unexpected type {:?}", col.data_type()));
-                assert!(arr.value(0) >= 2, "expected at least 2 history rows");
-                found = true;
-            }
+        if batch.num_rows() > 0
+            && let Some(col) = batch.column_by_name("CNT")
+        {
+            // Exasol returns COUNT(*) as DECIMAL(18,0), which arrives as Decimal128.
+            use arrow::array::Decimal128Array;
+            let arr = col
+                .as_any()
+                .downcast_ref::<Decimal128Array>()
+                .unwrap_or_else(|| panic!("CNT has unexpected type {:?}", col.data_type()));
+            assert!(arr.value(0) >= 2, "expected at least 2 history rows");
+            found = true;
         }
     }
     assert!(found, "COUNT query did not return a result");
@@ -577,12 +665,11 @@ fn contract_graph_run_id_matches_across_root_and_child() {
         .unwrap_or_default();
     let mut root_run_id = String::new();
     for batch in &batches {
-        if batch.num_rows() > 0 {
-            if let Some(col) = batch.column_by_name("RUN_ID") {
-                if let Some(arr) = col.as_any().downcast_ref::<StringArray>() {
-                    root_run_id = arr.value(0).to_string();
-                }
-            }
+        if batch.num_rows() > 0
+            && let Some(col) = batch.column_by_name("RUN_ID")
+            && let Some(arr) = col.as_any().downcast_ref::<StringArray>()
+        {
+            root_run_id = arr.value(0).to_string();
         }
     }
     assert!(!root_run_id.is_empty(), "no root history row found");
@@ -629,6 +716,45 @@ fn ensure_tables_creates_tables_when_they_do_not_exist() {
         table_exists(&db, &schema, "SCHED_HISTORY"),
         "SCHED_HISTORY should exist after ensure_tables"
     );
+}
+
+/// Inserts `/schema` before the query string of an `exasol://...` DSN.
+fn dsn_with_schema(dsn: &str, schema: &str) -> String {
+    match dsn.split_once('?') {
+        Some((base, query)) => format!("{base}/{schema}?{query}"),
+        None => format!("{dsn}/{schema}"),
+    }
+}
+
+#[test]
+fn ensure_tables_creates_schema_named_in_dsn() {
+    if skip_unless_enabled() {
+        return;
+    }
+
+    let dsn = nano_dsn();
+    let schema = contract_schema_name("CODEX_DSN_SCHEMA");
+    let _guard = SchemaDropGuard::new(dsn.clone(), schema.clone());
+
+    // exarrow-rs >= 0.21 refuses to connect when the DSN schema does not exist,
+    // so bootstrap must not depend on it.
+    let config = ExasolDbConfig {
+        dsn: dsn_with_schema(&dsn, &schema),
+        ..config_for_schema(&schema)
+    };
+    let db = ExasolDb::new(config).expect("failed to build ExasolDb");
+
+    let result = db
+        .ensure_tables()
+        .expect("ensure_tables should create the DSN schema");
+    assert!(result.tasks_table_created);
+    assert!(result.history_table_created);
+    assert!(table_exists(&db, &schema, "SCHED_TASKS"));
+
+    // Task SQL still runs with the DSN schema as its current schema.
+    db.execute_statement("CREATE TABLE UNQUALIFIED_TASK_TABLE (X INT)")
+        .expect("unqualified task SQL should resolve against the DSN schema");
+    assert!(table_exists(&db, &schema, "UNQUALIFIED_TASK_TABLE"));
 }
 
 struct UserDropGuard {
@@ -959,12 +1085,11 @@ fn contract_finalizer_phase_is_recorded_as_final() {
         .unwrap_or_default();
     let mut fin_run_id = String::new();
     for batch in &batches {
-        if batch.num_rows() > 0 {
-            if let Some(col) = batch.column_by_name("RUN_ID") {
-                if let Some(arr) = col.as_any().downcast_ref::<StringArray>() {
-                    fin_run_id = arr.value(0).to_string();
-                }
-            }
+        if batch.num_rows() > 0
+            && let Some(col) = batch.column_by_name("RUN_ID")
+            && let Some(arr) = col.as_any().downcast_ref::<StringArray>()
+        {
+            fin_run_id = arr.value(0).to_string();
         }
     }
     assert!(!fin_run_id.is_empty(), "no finalizer history row found");

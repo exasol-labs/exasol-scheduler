@@ -6,7 +6,7 @@ use thiserror::Error;
 pub use exasol::{
     EnsureTablesResult, ExasolDb, ExasolDbConfig, build_create_history_table_sql,
     build_create_tasks_table_sql, build_make_schedule_nullable_sql, build_tasks_last_changed_query,
-    build_write_history_sql,
+    build_write_history_sql, history_parameters,
 };
 
 use crate::model::{HistoryEvent, TaskRow};
@@ -56,15 +56,15 @@ impl DbError {
         source: exarrow::QueryError,
         schema: Option<&str>,
     ) -> Self {
-        if let Some(schema) = schema {
-            if let Some(hint) = schema_query_hint(&source, schema) {
-                return Self::QueryWithHint {
-                    operation,
-                    sql,
-                    source,
-                    hint,
-                };
-            }
+        if let Some(schema) = schema
+            && let Some(hint) = schema_query_hint(&source, schema)
+        {
+            return Self::QueryWithHint {
+                operation,
+                sql,
+                source,
+                hint,
+            };
         }
 
         Self::Query {

@@ -6,6 +6,47 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-20
+
+### Added
+
+- **Scheduler sessions are identifiable in Exasol.** The DSN is tagged with
+  `client_name=exasol-scheduler&client_version=<version>`, so `EXA_DBA_SESSIONS.CLIENT`
+  shows which sessions (and so which running task statements) belong to the scheduler.
+  A `client_name` or `client_version` already in the DSN is kept.
+
+### Changed
+
+- Dependency updates: `exarrow-rs` 0.25 (from 0.16) and `arrow` 59 (from 58, required by
+  `exarrow-rs` 0.23+), `proptest` 1.12, plus in-range lockfile updates (including
+  `tokio` 1.54, `uuid` 1.28, `rustls` 0.23.46 for RUSTSEC-2026-0346). `thrift` is no
+  longer in the dependency tree. Behaviour picked up from the driver:
+  - The connection timeout now bounds TCP connect, TLS, and login together, so an
+    unresponsive server fails the poll instead of hanging it.
+  - Large `SCHED_TASKS` results are returned exactly once per row (row duplication/loss on
+    multi-message results is fixed).
+  - Unknown DSN query keys are now rejected with an error naming the key. `autocommit=`,
+    `queryTimeout=`, and `idle_timeout` are no longer accepted; use `query_timeout` (or
+    `EXA_QUERY_TIMEOUT_SECS`).
+  - Servers reporting native protocol version below 14 are refused at login.
+- **History rows are written with server-side bound parameters.** Task ids, error
+  messages, and timestamps are no longer spliced into the `INSERT` as escaped literals;
+  the statement is prepared once per write and the values are bound. Error messages from
+  failed tasks are stored verbatim whatever they contain, and the SQL shown in a failed
+  history write no longer embeds the full error text.
+- **Clippy is clean and gates releases.** The release workflow runs
+  `cargo clippy --all-targets --locked -- -D warnings` before any build job, and CI runs
+  the same check. Minimum supported Rust is now 1.88 (`rust-version` in `Cargo.toml`),
+  because the code uses let-chains.
+
+### Fixed
+
+- **A DSN that names a schema which does not exist yet, such as `exasol://…/SCHED`, no
+  longer stops the first startup.** `exarrow-rs` 0.21+ refuses to connect when the DSN
+  schema is missing, which blocked the bootstrap that creates it. The scheduler's own
+  queries (bootstrap, task loading, history) now connect without a current schema, since
+  they are fully qualified. Task SQL still runs with the DSN schema as its current schema.
+
 ## [0.3.1] - 2026-10-01
 
 ### Fixed
@@ -90,7 +131,8 @@ Initial release.
 - Agent skill documentation (`docs/agent-skill.md`) and security guidance.
 - Release builds for a target matrix of runners.
 
-[Unreleased]: https://github.com/exasol-labs/exasol-scheduler/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/exasol-labs/exasol-scheduler/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/exasol-labs/exasol-scheduler/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/exasol-labs/exasol-scheduler/compare/v0.3...v0.3.1
 [0.3]: https://github.com/exasol-labs/exasol-scheduler/compare/v0.2...v0.3
 [0.2]: https://github.com/exasol-labs/exasol-scheduler/compare/v0.1.0...v0.2
