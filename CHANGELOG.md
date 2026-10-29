@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-10-29
+
 ### Changed
 
 - Dependency updates: `exarrow-rs` 0.30 (from 0.25) and `arrow` 60 (from 59, required by
@@ -137,7 +139,8 @@ Initial release.
 - Agent skill documentation (`docs/agent-skill.md`) and security guidance.
 - Release builds for a target matrix of runners.
 
-[Unreleased]: https://github.com/exasol-labs/exasol-scheduler/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/exasol-labs/exasol-scheduler/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/exasol-labs/exasol-scheduler/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/exasol-labs/exasol-scheduler/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/exasol-labs/exasol-scheduler/compare/v0.3...v0.3.1
 [0.3]: https://github.com/exasol-labs/exasol-scheduler/compare/v0.2...v0.3
