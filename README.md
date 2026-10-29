@@ -5,7 +5,7 @@
 **Lightweight table-driven SQL job scheduling for Exasol**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.88%2B-orange.svg)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.89%2B-orange.svg)](https://www.rust-lang.org)
 [![Build](https://img.shields.io/badge/build-passing-brightgreen.svg)](#)
 
 *Define jobs in SQL. Run them with SQL. Audit them with SQL.*
@@ -38,7 +38,7 @@ Work that depends on external executables must be orchestrated elsewhere or reim
 
 ## Building from source
 
-Requires [Rust](https://rustup.rs) 1.88 or later.
+Requires [Rust](https://rustup.rs) 1.89 or later.
 
 ```bash
 git clone https://github.com/exasol-labs/exasol-scheduler.git

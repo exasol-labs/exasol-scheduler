@@ -1,12 +1,12 @@
 [package]
 name = "exasol_scheduler"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 
 [dependencies]
 # exarrow-rs provides production Exasol access.
-exarrow = { package = "exarrow-rs", version = "0.25.0" }
+exarrow = { package = "exarrow-rs", version = "0.30.0" }
 # Tokio: follow exarrow-rs guidance (rt-multi-thread + macros) while keeping features minimal.
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 chrono = { version = "0.4", features = ["serde"] }
@@ -18,7 +18,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-arrow = "59"
+arrow = "60"
 
 [dev-dependencies]
 mockall = "0.15"
