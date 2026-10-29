@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- Dependency updates: `exarrow-rs` 0.30 (from 0.25) and `arrow` 60 (from 59, required by
+  `exarrow-rs` 0.30), plus compatible lockfile updates.
+- Minimum supported Rust is now 1.89 (from 1.88), required by `uuid` 1.27+.
+
 ## [0.4.0] - 2026-10-20
 
 ### Added

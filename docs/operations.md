@@ -7,7 +7,7 @@ cargo build --release
 # Binary is at target/release/exasol_scheduler
 ```
 
-Requires Rust 1.88 or later (edition 2024, let-chains).
+Requires Rust 1.89 or later (edition 2024, let-chains).
 
 **Run the test suite** (no Exasol required):
 
